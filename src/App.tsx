@@ -668,57 +668,77 @@ export function App() {
           </Card>
 
           <Card className="bg-card/90 shadow-xl shadow-primary/5">
-            <CardHeader>
-              <div>
-                <Badge variant="secondary" className="tracking-[0.2em]">
-                  Trusted devices
-                </Badge>
+            <CardHeader className="gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center justify-between gap-3">
+                  <Badge variant="secondary" className="tracking-[0.2em]">
+                    Devices
+                  </Badge>
+                  <Badge variant="outline" className="shrink-0">
+                    {devices.length} trusted
+                  </Badge>
+                </div>
                 <CardTitle className="mt-3 text-2xl font-semibold tracking-[-0.05em]">
-                  Device identity
+                  Trusted browsers
                 </CardTitle>
-                <CardDescription>
-                  Rename this browser so other paired devices can recognize it.
+                <CardDescription className="mt-1">
+                  Names shown here are visible to other paired devices.
                 </CardDescription>
               </div>
-              <CardAction>
-                <Badge variant="outline">{devices.length} trusted</Badge>
-              </CardAction>
             </CardHeader>
 
             <CardContent className="grid gap-4">
               {currentDeviceId ? (
                 <form className="grid gap-2" onSubmit={submitDeviceName}>
-                  <Label htmlFor="device-name">This device name</Label>
+                  <Label
+                    className="uppercase tracking-[0.2em] text-muted-foreground"
+                    htmlFor="device-name"
+                  >
+                    This device
+                  </Label>
                   <div className="flex gap-2">
                     <Input
+                      className="min-w-0 bg-background/80"
                       id="device-name"
                       value={deviceName}
                       onChange={(event) => setDeviceName(event.target.value)}
                     />
-                    <Button type="submit" disabled={deviceSaving}>
+                    <Button
+                      className="shrink-0"
+                      type="submit"
+                      disabled={deviceSaving}
+                    >
                       {deviceSaving ? "Saving..." : "Save"}
                     </Button>
                   </div>
                 </form>
-              ) : (
-                <div className="border bg-muted p-3 text-xs text-muted-foreground">
-                  This localhost session is trusted automatically. Open the LAN
-                  URL and pair this browser if you want it to appear as a named
-                  device.
-                </div>
-              )}
+              ) : devices.length === 0 ? (
+                <p className="border bg-muted p-3 text-xs leading-5 text-muted-foreground">
+                  Localhost is trusted automatically. Open the LAN URL and pair
+                  this browser if you want a named device.
+                </p>
+              ) : null}
+
+              {!currentDeviceId && devices.length > 0 ? (
+                <p className="text-xs leading-5 text-muted-foreground">
+                  Localhost is auto-trusted. Rename from the paired LAN browser.
+                </p>
+              ) : null}
 
               <div className="grid gap-2">
                 {devices.map((device) => (
                   <article
-                    className="flex items-center justify-between gap-3 border bg-background/70 p-3"
+                    className="grid grid-cols-[1fr_auto] items-center gap-3 border bg-background/70 p-3"
                     key={device.id}
                   >
                     <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">
+                      <div
+                        className="truncate text-sm font-medium"
+                        title={device.name}
+                      >
                         {device.name}
                       </div>
-                      <div className="mt-1 text-xs text-muted-foreground">
+                      <div className="mt-1 truncate text-xs text-muted-foreground">
                         Paired {new Date(device.created_at).toLocaleString()}
                       </div>
                     </div>
