@@ -1,7 +1,7 @@
 import { FileSystem, HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "@effect/platform";
 import { BunFileSystem, BunHttpServer, BunPath, BunRuntime } from "@effect/platform-bun";
 import { Database, type Statement } from "bun:sqlite";
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { homedir, networkInterfaces } from "node:os";
 import { basename, join, resolve, sep } from "node:path";
 import { Effect, Layer, PubSub, Schedule, Stream, pipe } from "effect";
@@ -28,8 +28,18 @@ interface ItemRow {
   readonly created_at: number;
 }
 
+interface TrustedDeviceInsert {
+  readonly id: string;
+  readonly name: string;
+  readonly tokenHash: string;
+  readonly createdAt: number;
+}
+
 const PORT = Number(process.env.PORT ?? "8787");
 const HOST = process.env.HOST ?? "0.0.0.0";
+const TOKEN_COOKIE = "landrop_token";
+const TOKEN_MAX_AGE_SECONDS = 60 * 60 * 24 * 365;
+const PAIRING_CODE = process.env.LANDROP_PAIRING_CODE ?? randomPairingCode();
 
 const ROOT = process.env.LANDROP_ROOT ?? join(homedir(), "Downloads", "landrop");
 const PASTES_DIR = join(ROOT, "pastes");
@@ -63,10 +73,25 @@ class AppDb extends Effect.Service<AppDb>()("AppDb", {
         )
       `),
     );
+    yield* Effect.sync(() =>
+      db.run(`
+        CREATE TABLE IF NOT EXISTS trusted_devices (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          token_hash TEXT NOT NULL UNIQUE,
+          created_at INTEGER NOT NULL,
+          revoked_at INTEGER
+        )
+      `),
+    );
 
     const insertItem = db.prepare(`
       INSERT INTO items (id, kind, name, mime_type, size, path, created_at)
       VALUES ($id, $kind, $name, $mimeType, $size, $path, $createdAt)
+    `);
+    const insertTrustedDevice = db.prepare(`
+      INSERT INTO trusted_devices (id, name, token_hash, created_at)
+      VALUES ($id, $name, $tokenHash, $createdAt)
     `);
 
     const selectRecent = db.prepare(`
@@ -82,11 +107,20 @@ class AppDb extends Effect.Service<AppDb>()("AppDb", {
       WHERE id = $id
       LIMIT 1
     `);
+    const selectTrustedToken = db.prepare(`
+      SELECT id
+      FROM trusted_devices
+      WHERE token_hash = $tokenHash AND revoked_at IS NULL
+      LIMIT 1
+    `);
 
     return {
       insert: (item: ItemInsert) => insert(insertItem, item),
+      trustDevice: (device: TrustedDeviceInsert) => insertTrustedDeviceRow(insertTrustedDevice, device),
       recent: Effect.sync(() => selectRecent.all() as ItemRow[]),
       findById: (id: string) => Effect.sync(() => selectById.get({ $id: id }) as ItemRow | null),
+      hasTrustedToken: (token: string) =>
+        Effect.sync(() => Boolean(selectTrustedToken.get({ $tokenHash: hashToken(token) }))),
     } as const;
   }),
 }) {}
@@ -115,6 +149,16 @@ const insert = (statement: Statement, item: ItemInsert) =>
     }),
   );
 
+const insertTrustedDeviceRow = (statement: Statement, device: TrustedDeviceInsert) =>
+  Effect.sync(() =>
+    statement.run({
+      $id: device.id,
+      $name: device.name,
+      $tokenHash: device.tokenHash,
+      $createdAt: device.createdAt,
+    }),
+  );
+
 const ensureInbox = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
 
@@ -127,6 +171,12 @@ const redirectHome = HttpServerResponse.redirect("/", {
 });
 
 const handlePaste = Effect.gen(function* () {
+  const auth = yield* requireTrustedDevice;
+
+  if (auth) {
+    return auth;
+  }
+
   const request = yield* HttpServerRequest.HttpServerRequest;
   const webRequest = yield* HttpServerRequest.toWeb(request);
   const form = yield* Effect.tryPromise(() => webRequest.formData());
@@ -161,6 +211,12 @@ const handlePaste = Effect.gen(function* () {
 });
 
 const handleUpload = Effect.gen(function* () {
+  const auth = yield* requireTrustedDevice;
+
+  if (auth) {
+    return auth;
+  }
+
   const request = yield* HttpServerRequest.HttpServerRequest;
   const webRequest = yield* HttpServerRequest.toWeb(request);
   const form = yield* Effect.tryPromise(() => webRequest.formData());
@@ -194,6 +250,12 @@ const handleUpload = Effect.gen(function* () {
 });
 
 const handleItems = Effect.gen(function* () {
+  const auth = yield* requireTrustedDevice;
+
+  if (auth) {
+    return auth;
+  }
+
   const db = yield* AppDb;
   const rows = yield* db.recent;
 
@@ -203,11 +265,56 @@ const handleItems = Effect.gen(function* () {
 const handleOpenItem = serveItemFile(false);
 const handleDownloadItem = serveItemFile(true);
 
+const handleAuthStatus = Effect.gen(function* () {
+  const trusted = yield* isTrustedRequest;
+
+  return yield* HttpServerResponse.json({ trusted });
+});
+
+const handlePair = Effect.gen(function* () {
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  const webRequest = yield* HttpServerRequest.toWeb(request);
+  const body = (yield* Effect.tryPromise(() => webRequest.json())) as {
+    readonly code?: unknown;
+    readonly name?: unknown;
+  };
+  const code = typeof body.code === "string" ? body.code.trim() : "";
+
+  if (!constantTimeEqual(code, PAIRING_CODE)) {
+    return HttpServerResponse.text("Invalid pairing code", { status: 401 });
+  }
+
+  const token = randomBytes(32).toString("base64url");
+  const db = yield* AppDb;
+
+  yield* db.trustDevice({
+    id: randomUUID(),
+    name: typeof body.name === "string" && body.name.trim() ? body.name.trim() : "Browser",
+    tokenHash: hashToken(token),
+    createdAt: Date.now(),
+  });
+
+  return yield* HttpServerResponse.json(
+    { trusted: true },
+    {
+      headers: {
+        "set-cookie": `${TOKEN_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${TOKEN_MAX_AGE_SECONDS}`,
+      },
+    },
+  );
+});
+
 const handleConnect = HttpServerResponse.json({
   url: preferredConnectUrl(),
 });
 
 const handleEvents = Effect.gen(function* () {
+  const auth = yield* requireTrustedDevice;
+
+  if (auth) {
+    return auth;
+  }
+
   const events = yield* ItemEvents;
   const itemEvents = pipe(
     events.stream,
@@ -279,6 +386,8 @@ const app = pipe(
   HttpRouter.empty,
   HttpRouter.post("/api/paste", handlePaste),
   HttpRouter.post("/api/upload", handleUpload),
+  HttpRouter.get("/api/auth/status", handleAuthStatus),
+  HttpRouter.post("/api/pair", handlePair),
   HttpRouter.get("/api/items", handleItems),
   HttpRouter.get("/api/items/:id/open", handleOpenItem),
   HttpRouter.get("/api/items/:id/download", handleDownloadItem),
@@ -302,7 +411,7 @@ const Live = Layer.mergeAll(ServerLive, PlatformLive, AppDbLive, ItemEvents.Defa
 
 const program = pipe(
   ensureInbox,
-  Effect.zipRight(Effect.log(`LAN Drop listening:\n${serverUrls().join("\n")}`)),
+  Effect.zipRight(Effect.log(`LAN Drop listening:\n${serverUrls().join("\n")}\nPairing code: ${PAIRING_CODE}`)),
   Effect.zipRight(HttpServer.serveEffect(app)),
   Effect.zipRight(Effect.never),
   Effect.provide(Live),
@@ -327,6 +436,12 @@ function isInsideDist(path: string) {
 
 function serveItemFile(download: boolean) {
   return Effect.gen(function* () {
+    const auth = yield* requireTrustedDevice;
+
+    if (auth) {
+      return auth;
+    }
+
     const params = yield* HttpRouter.params;
     const id = params.id;
 
@@ -369,6 +484,25 @@ function serveItemFile(download: boolean) {
   });
 }
 
+const requireTrustedDevice = Effect.gen(function* () {
+  const trusted = yield* isTrustedRequest;
+
+  return trusted ? null : HttpServerResponse.text("Pairing required", { status: 401 });
+});
+
+const isTrustedRequest = Effect.gen(function* () {
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  const token = request.cookies[TOKEN_COOKIE];
+
+  if (!token) {
+    return false;
+  }
+
+  const db = yield* AppDb;
+
+  return yield* db.hasTrustedToken(token);
+});
+
 function isInside(path: string, root: string) {
   return path === root || path.startsWith(`${root}${sep}`);
 }
@@ -401,6 +535,21 @@ function preferredConnectUrl() {
   const urls = serverUrls();
 
   return urls.find((url) => !url.includes("localhost")) ?? urls[0] ?? `http://localhost:${PORT}`;
+}
+
+function hashToken(token: string) {
+  return createHash("sha256").update(token).digest("base64url");
+}
+
+function randomPairingCode() {
+  return Array.from({ length: 3 }, () => randomBytes(2).readUInt16BE(0).toString().padStart(5, "0")).join("-");
+}
+
+function constantTimeEqual(left: string, right: string) {
+  const leftBytes = Buffer.from(left);
+  const rightBytes = Buffer.from(right);
+
+  return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 }
 
 function installTerminalCleanup() {

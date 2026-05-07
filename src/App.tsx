@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { type FormEvent, useEffect, useState } from "react"
 import { toDataURL } from "qrcode"
 
 import { Badge } from "@/components/ui/badge"
@@ -49,12 +49,53 @@ const numberFormat = new Intl.NumberFormat()
 export function App() {
   const [items, setItems] = useState<Item[]>([])
   const [status, setStatus] = useState("Loading recent drops...")
+  const [trusted, setTrusted] = useState<boolean | null>(null)
+  const [pairingCode, setPairingCode] = useState("")
+  const [pairingStatus, setPairingStatus] = useState("")
   const [connectUrl, setConnectUrl] = useState("")
   const [qrDataUrl, setQrDataUrl] = useState("")
   const [preview, setPreview] = useState<Preview>({ status: "idle" })
   const [copyStatus, setCopyStatus] = useState("Copy")
 
   useEffect(() => {
+    let cancelled = false
+
+    fetch("/api/connect")
+      .then((response) => response.json() as Promise<{ url: string }>)
+      .then(({ url }) => {
+        if (!cancelled) {
+          setConnectUrl(url)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setConnectUrl(window.location.href)
+        }
+      })
+
+    fetch("/api/auth/status")
+      .then((response) => response.json() as Promise<{ trusted: boolean }>)
+      .then(({ trusted: nextTrusted }) => {
+        if (!cancelled) {
+          setTrusted(nextTrusted)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setTrusted(false)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!trusted) {
+      return
+    }
+
     let cancelled = false
 
     const loadItems = () => {
@@ -79,19 +120,6 @@ export function App() {
         })
     }
 
-    fetch("/api/connect")
-      .then((response) => response.json() as Promise<{ url: string }>)
-      .then(({ url }) => {
-        if (!cancelled) {
-          setConnectUrl(url)
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setConnectUrl(window.location.href)
-        }
-      })
-
     loadItems()
 
     const events = new EventSource("/api/events")
@@ -106,7 +134,7 @@ export function App() {
       cancelled = true
       events.close()
     }
-  }, [])
+  }, [trusted])
 
   useEffect(() => {
     let cancelled = false
@@ -204,6 +232,91 @@ export function App() {
         setCopyStatus("Copy failed")
         window.setTimeout(() => setCopyStatus("Copy"), 1200)
       })
+  }
+
+  const submitPairing = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setPairingStatus("Pairing...")
+
+    fetch("/api/pair", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        code: pairingCode,
+        name: navigator.userAgent,
+      }),
+    })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("Invalid pairing code")
+        }
+
+        return response.json() as Promise<{ trusted: boolean }>
+      })
+      .then(() => {
+        setTrusted(true)
+        setPairingCode("")
+        setPairingStatus("")
+      })
+      .catch((error: unknown) => {
+        setPairingStatus(
+          error instanceof Error ? error.message : "Pairing failed",
+        )
+      })
+  }
+
+  if (trusted === null) {
+    return (
+      <main className="grid min-h-svh place-items-center bg-background p-4 text-foreground">
+        <Card className="w-full max-w-sm">
+          <CardHeader>
+            <CardTitle>LAN Drop</CardTitle>
+            <CardDescription>Checking trusted device status...</CardDescription>
+          </CardHeader>
+        </Card>
+      </main>
+    )
+  }
+
+  if (!trusted) {
+    return (
+      <main className="grid min-h-svh place-items-center bg-[radial-gradient(circle_at_0%_0%,oklch(0.879_0.169_91.605/.35),transparent_28rem),linear-gradient(135deg,var(--background),var(--muted))] p-4 text-foreground">
+        <Card className="w-full max-w-md bg-card/90 shadow-2xl shadow-primary/10">
+          <CardHeader>
+            <Badge variant="outline" className="w-fit tracking-[0.24em]">
+              Pair device
+            </Badge>
+            <CardTitle className="text-3xl tracking-[-0.06em]">
+              Trust this browser
+            </CardTitle>
+            <CardDescription>
+              Enter the pairing code printed in the desktop server console.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form className="grid gap-3" onSubmit={submitPairing}>
+              <Label htmlFor="pairing-code">Pairing code</Label>
+              <Input
+                autoComplete="one-time-code"
+                id="pairing-code"
+                inputMode="numeric"
+                placeholder="00000-00000-00000"
+                value={pairingCode}
+                onChange={(event) => setPairingCode(event.target.value)}
+              />
+              <Button className="h-10" type="submit">
+                Pair device
+              </Button>
+              {pairingStatus ? (
+                <p className="text-xs text-muted-foreground">{pairingStatus}</p>
+              ) : null}
+            </form>
+          </CardContent>
+        </Card>
+      </main>
+    )
   }
 
   return (
