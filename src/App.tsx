@@ -78,6 +78,7 @@ export function App() {
   const [currentDeviceId, setCurrentDeviceId] = useState<string | null>(null)
   const [deviceName, setDeviceName] = useState(defaultDeviceName)
   const [deviceSaving, setDeviceSaving] = useState(false)
+  const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null)
   const [preview, setPreview] = useState<Preview>({ status: "idle" })
   const [copyStatus, setCopyStatus] = useState("Copy")
   const [pasteSubmitting, setPasteSubmitting] = useState(false)
@@ -480,6 +481,44 @@ export function App() {
       })
   }
 
+  const revokeDevice = (device: TrustedDevice) => {
+    if (revokingDeviceId) {
+      return
+    }
+
+    setRevokingDeviceId(device.id)
+
+    fetch(`/api/devices/${device.id}`, {
+      method: "DELETE",
+    })
+      .then(throwIfNotOk)
+      .then(() => {
+        setDevices((currentDevices) =>
+          currentDevices.filter((currentDevice) => currentDevice.id !== device.id),
+        )
+
+        if (device.id === currentDeviceId) {
+          setCurrentDeviceId(null)
+          setTrusted(false)
+        }
+
+        toast.success("Device revoked", {
+          description: device.name,
+        })
+      })
+      .catch((error: unknown) => {
+        toast.error("Could not revoke device", {
+          description:
+            error instanceof Error
+              ? error.message
+              : "Device revoke request failed",
+        })
+      })
+      .finally(() => {
+        setRevokingDeviceId(null)
+      })
+  }
+
   if (trusted === null) {
     return (
       <main className="grid min-h-svh place-items-center bg-background p-4 text-foreground">
@@ -543,6 +582,158 @@ export function App() {
 
   return (
     <main className="min-h-svh overflow-hidden bg-[radial-gradient(circle_at_0%_0%,oklch(0.879_0.169_91.605/.35),transparent_28rem),radial-gradient(circle_at_100%_20%,oklch(0.52_0.105_223.128/.18),transparent_24rem),linear-gradient(135deg,var(--background),var(--muted))] px-4 py-5 text-foreground sm:px-8 sm:py-8">
+      <div className="mx-auto mb-3 flex max-w-6xl justify-end gap-2">
+        <Dialog>
+          <DialogTrigger
+            render={
+              <Button className="h-9 px-3 text-xs" type="button" variant="outline" />
+            }
+          >
+            Devices
+          </DialogTrigger>
+          <DialogContent className="max-h-[calc(100svh-2rem)] overflow-hidden sm:max-w-xl">
+            <DialogHeader>
+              <DialogTitle>Trusted browsers</DialogTitle>
+              <DialogDescription>
+                Rename this browser or revoke paired devices.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="grid gap-4 overflow-hidden">
+              {currentDeviceId ? (
+                <form className="grid gap-2" onSubmit={submitDeviceName}>
+                  <Label
+                    className="uppercase tracking-[0.2em] text-muted-foreground"
+                    htmlFor="device-name"
+                  >
+                    This device
+                  </Label>
+                  <div className="flex gap-2">
+                    <Input
+                      className="min-w-0 bg-background/80"
+                      id="device-name"
+                      value={deviceName}
+                      onChange={(event) => setDeviceName(event.target.value)}
+                    />
+                    <Button
+                      className="shrink-0"
+                      type="submit"
+                      disabled={deviceSaving}
+                    >
+                      {deviceSaving ? "Saving..." : "Save"}
+                    </Button>
+                  </div>
+                </form>
+              ) : devices.length === 0 ? (
+                <p className="border bg-muted p-3 text-xs leading-5 text-muted-foreground">
+                  Localhost is trusted automatically. Open the LAN URL and pair
+                  this browser if you want a named device.
+                </p>
+              ) : (
+                <p className="text-xs leading-5 text-muted-foreground">
+                  Localhost is auto-trusted. Rename from the paired LAN browser.
+                </p>
+              )}
+
+              <ScrollArea className="max-h-[50svh]">
+                <div className="grid gap-2 pr-3">
+                  {devices.map((device) => (
+                    <article
+                      className="grid grid-cols-[1fr_auto] items-center gap-3 border bg-background/70 p-3"
+                      key={device.id}
+                    >
+                      <div className="min-w-0">
+                        <div
+                          className="truncate text-sm font-medium"
+                          title={device.name}
+                        >
+                          {device.name}
+                        </div>
+                        <div className="mt-1 truncate text-xs text-muted-foreground">
+                          Paired {new Date(device.created_at).toLocaleString()}
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        {device.id === currentDeviceId ? (
+                          <Badge variant="default">This</Badge>
+                        ) : (
+                          <Badge variant="outline">Trusted</Badge>
+                        )}
+                        <Button
+                          size="xs"
+                          type="button"
+                          variant="destructive"
+                          disabled={revokingDeviceId === device.id}
+                          onClick={() => revokeDevice(device)}
+                        >
+                          {revokingDeviceId === device.id ? "..." : "Revoke"}
+                        </Button>
+                      </div>
+                    </article>
+                  ))}
+
+                  {devices.length === 0 ? (
+                    <div className="border bg-muted p-3 text-xs text-muted-foreground">
+                      No token-backed devices yet.
+                    </div>
+                  ) : null}
+                </div>
+              </ScrollArea>
+            </div>
+
+            <DialogFooter showCloseButton />
+          </DialogContent>
+        </Dialog>
+
+        <Dialog>
+          <DialogTrigger
+            render={
+              <Button
+                aria-label="Connect phone"
+                className="text-lg"
+                size="icon-lg"
+                type="button"
+              />
+            }
+          >
+            +
+          </DialogTrigger>
+          <DialogContent className="sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>Connect phone</DialogTitle>
+              <DialogDescription>
+                Scan this QR code from your phone on the same Wi-Fi.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="grid gap-4">
+              <div className="mx-auto border bg-white p-4">
+                {qrDataUrl ? (
+                  <img
+                    alt={`QR code for ${connectUrl}`}
+                    className="size-64"
+                    src={qrDataUrl}
+                  />
+                ) : (
+                  <div className="grid size-64 place-items-center text-xs text-black">
+                    Generating QR...
+                  </div>
+                )}
+              </div>
+
+              <a
+                className="break-all border bg-muted px-3 py-2 text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+                href={connectUrl}
+              >
+                {connectUrl || "Loading LAN address..."}
+              </a>
+            </div>
+
+            <DialogFooter showCloseButton />
+          </DialogContent>
+        </Dialog>
+      </div>
+
       <div className="mx-auto grid max-w-6xl gap-5 lg:grid-cols-[1.05fr_0.95fr]">
         <Card className="relative min-h-[calc(100svh-2.5rem)] justify-between bg-card/90 py-0 shadow-2xl shadow-primary/10 backdrop-blur">
           <div className="absolute -right-20 -top-20 h-56 w-56 rounded-full bg-primary/10 blur-3xl" />
@@ -558,48 +749,6 @@ export function App() {
               Send JSON, notes, screenshots, and files from your phone to this
               desktop without a chat app or cloud hop.
             </CardDescription>
-            <Dialog>
-              <DialogTrigger
-                render={
-                  <Button className="mt-6 h-10 w-fit text-sm" type="button" />
-                }
-              >
-                Connect phone
-              </DialogTrigger>
-              <DialogContent className="sm:max-w-md">
-                <DialogHeader>
-                  <DialogTitle>Connect phone</DialogTitle>
-                  <DialogDescription>
-                    Scan this QR code from your phone on the same Wi-Fi.
-                  </DialogDescription>
-                </DialogHeader>
-
-                <div className="grid gap-4">
-                  <div className="mx-auto border bg-white p-4">
-                    {qrDataUrl ? (
-                      <img
-                        alt={`QR code for ${connectUrl}`}
-                        className="size-64"
-                        src={qrDataUrl}
-                      />
-                    ) : (
-                      <div className="grid size-64 place-items-center text-xs text-black">
-                        Generating QR...
-                      </div>
-                    )}
-                  </div>
-
-                  <a
-                    className="break-all border bg-muted px-3 py-2 text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-                    href={connectUrl}
-                  >
-                    {connectUrl || "Loading LAN address..."}
-                  </a>
-                </div>
-
-                <DialogFooter showCloseButton />
-              </DialogContent>
-            </Dialog>
           </CardHeader>
 
           <CardContent className="relative px-5 pb-6 sm:px-8 sm:pb-8">
@@ -664,98 +813,6 @@ export function App() {
                   {uploadSubmitting ? "Uploading..." : "Upload file"}
                 </Button>
               </form>
-            </CardContent>
-          </Card>
-
-          <Card className="bg-card/90 shadow-xl shadow-primary/5">
-            <CardHeader className="gap-3">
-              <div className="min-w-0">
-                <div className="flex items-center justify-between gap-3">
-                  <Badge variant="secondary" className="tracking-[0.2em]">
-                    Devices
-                  </Badge>
-                  <Badge variant="outline" className="shrink-0">
-                    {devices.length} trusted
-                  </Badge>
-                </div>
-                <CardTitle className="mt-3 text-2xl font-semibold tracking-[-0.05em]">
-                  Trusted browsers
-                </CardTitle>
-                <CardDescription className="mt-1">
-                  Names shown here are visible to other paired devices.
-                </CardDescription>
-              </div>
-            </CardHeader>
-
-            <CardContent className="grid gap-4">
-              {currentDeviceId ? (
-                <form className="grid gap-2" onSubmit={submitDeviceName}>
-                  <Label
-                    className="uppercase tracking-[0.2em] text-muted-foreground"
-                    htmlFor="device-name"
-                  >
-                    This device
-                  </Label>
-                  <div className="flex gap-2">
-                    <Input
-                      className="min-w-0 bg-background/80"
-                      id="device-name"
-                      value={deviceName}
-                      onChange={(event) => setDeviceName(event.target.value)}
-                    />
-                    <Button
-                      className="shrink-0"
-                      type="submit"
-                      disabled={deviceSaving}
-                    >
-                      {deviceSaving ? "Saving..." : "Save"}
-                    </Button>
-                  </div>
-                </form>
-              ) : devices.length === 0 ? (
-                <p className="border bg-muted p-3 text-xs leading-5 text-muted-foreground">
-                  Localhost is trusted automatically. Open the LAN URL and pair
-                  this browser if you want a named device.
-                </p>
-              ) : null}
-
-              {!currentDeviceId && devices.length > 0 ? (
-                <p className="text-xs leading-5 text-muted-foreground">
-                  Localhost is auto-trusted. Rename from the paired LAN browser.
-                </p>
-              ) : null}
-
-              <div className="grid gap-2">
-                {devices.map((device) => (
-                  <article
-                    className="grid grid-cols-[1fr_auto] items-center gap-3 border bg-background/70 p-3"
-                    key={device.id}
-                  >
-                    <div className="min-w-0">
-                      <div
-                        className="truncate text-sm font-medium"
-                        title={device.name}
-                      >
-                        {device.name}
-                      </div>
-                      <div className="mt-1 truncate text-xs text-muted-foreground">
-                        Paired {new Date(device.created_at).toLocaleString()}
-                      </div>
-                    </div>
-                    {device.id === currentDeviceId ? (
-                      <Badge variant="default">This device</Badge>
-                    ) : (
-                      <Badge variant="outline">Trusted</Badge>
-                    )}
-                  </article>
-                ))}
-
-                {devices.length === 0 ? (
-                  <div className="border bg-muted p-3 text-xs text-muted-foreground">
-                    No token-backed devices yet.
-                  </div>
-                ) : null}
-              </div>
             </CardContent>
           </Card>
 

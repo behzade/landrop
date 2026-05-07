@@ -138,6 +138,11 @@ class AppDb extends Effect.Service<AppDb>()("AppDb", {
       SET name = $name
       WHERE id = $id AND revoked_at IS NULL
     `);
+    const revokeTrustedDevice = db.prepare(`
+      UPDATE trusted_devices
+      SET revoked_at = $revokedAt
+      WHERE id = $id AND revoked_at IS NULL
+    `);
 
     return {
       insert: (item: ItemInsert) => insert(insertItem, item),
@@ -149,6 +154,8 @@ class AppDb extends Effect.Service<AppDb>()("AppDb", {
         Effect.sync(() => selectTrustedToken.get({ $tokenHash: hashToken(token) }) as TrustedDeviceRow | null),
       renameTrustedDevice: (id: string, name: string) =>
         Effect.sync(() => updateTrustedDeviceName.run({ $id: id, $name: name })),
+      revokeTrustedDevice: (id: string) =>
+        Effect.sync(() => revokeTrustedDevice.run({ $id: id, $revokedAt: Date.now() })),
       hasTrustedToken: (token: string) =>
         Effect.sync(() => Boolean(selectTrustedToken.get({ $tokenHash: hashToken(token) }))),
     } as const;
@@ -391,6 +398,35 @@ const handleRenameCurrentDevice = Effect.gen(function* () {
   });
 });
 
+const handleRevokeDevice = Effect.gen(function* () {
+  const auth = yield* requireTrustedDevice;
+
+  if (auth) {
+    return auth;
+  }
+
+  const params = yield* HttpRouter.params;
+  const id = params.id;
+
+  if (!id) {
+    return HttpServerResponse.text("Missing device id", { status: 400 });
+  }
+
+  const currentDevice = yield* currentTrustedDevice;
+  const db = yield* AppDb;
+
+  yield* db.revokeTrustedDevice(id);
+
+  const headers =
+    currentDevice?.id === id
+      ? {
+          "set-cookie": `${TOKEN_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`,
+        }
+      : undefined;
+
+  return yield* HttpServerResponse.json({ revoked: true }, { headers });
+});
+
 const handleConnect = HttpServerResponse.json({
   url: connectUrlWithPairingCode(),
 });
@@ -501,6 +537,7 @@ const app = pipe(
   HttpRouter.post("/api/pair", handlePair),
   HttpRouter.get("/api/devices", handleDevices),
   HttpRouter.patch("/api/devices/current", handleRenameCurrentDevice),
+  HttpRouter.del("/api/devices/:id", handleRevokeDevice),
   HttpRouter.get("/api/items", handleItems),
   HttpRouter.get("/api/items/:id/open", handleOpenItem),
   HttpRouter.get("/api/items/:id/download", handleDownloadItem),
