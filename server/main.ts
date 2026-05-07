@@ -305,7 +305,7 @@ const handlePair = Effect.gen(function* () {
 });
 
 const handleConnect = HttpServerResponse.json({
-  url: preferredConnectUrl(),
+  url: connectUrlWithPairingCode(),
 });
 
 const handleEvents = Effect.gen(function* () {
@@ -535,6 +535,13 @@ function preferredConnectUrl() {
   const urls = serverUrls();
 
   return urls.find((url) => !url.includes("localhost")) ?? urls[0] ?? `http://localhost:${PORT}`;
+}
+
+function connectUrlWithPairingCode() {
+  const url = new URL(preferredConnectUrl());
+  url.searchParams.set("pairingCode", PAIRING_CODE);
+
+  return url.toString();
 }
 
 function hashToken(token: string) {

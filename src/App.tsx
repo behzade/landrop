@@ -59,6 +59,13 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false
+    const codeFromUrl = new URLSearchParams(window.location.search).get(
+      "pairingCode",
+    )
+
+    if (codeFromUrl) {
+      setPairingCode(codeFromUrl)
+    }
 
     fetch("/api/connect")
       .then((response) => response.json() as Promise<{ url: string }>)
