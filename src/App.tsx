@@ -1,5 +1,6 @@
 import { type FormEvent, useEffect, useState } from "react"
 import { toDataURL } from "qrcode"
+import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -56,6 +57,8 @@ export function App() {
   const [qrDataUrl, setQrDataUrl] = useState("")
   const [preview, setPreview] = useState<Preview>({ status: "idle" })
   const [copyStatus, setCopyStatus] = useState("Copy")
+  const [pasteSubmitting, setPasteSubmitting] = useState(false)
+  const [uploadSubmitting, setUploadSubmitting] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -122,7 +125,13 @@ export function App() {
         })
         .catch((error: unknown) => {
           if (!cancelled) {
-            setStatus(error instanceof Error ? error.message : "Failed to load")
+            const message =
+              error instanceof Error ? error.message : "Failed to load"
+
+            setStatus(message)
+            toast.error("Could not load inbox", {
+              description: message,
+            })
           }
         })
     }
@@ -216,10 +225,15 @@ export function App() {
         setPreview({ ...nextPreview, status: "ready", item })
       })
       .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : "Failed to load"
+
         setPreview({
           status: "error",
           item,
-          message: error instanceof Error ? error.message : "Failed to load",
+          message,
+        })
+        toast.error("Could not open item", {
+          description: message,
         })
       })
   }
@@ -233,11 +247,95 @@ export function App() {
       .writeText(preview.text)
       .then(() => {
         setCopyStatus("Copied")
+        toast.success("Copied to clipboard")
         window.setTimeout(() => setCopyStatus("Copy"), 1200)
       })
       .catch(() => {
         setCopyStatus("Copy failed")
+        toast.error("Clipboard copy failed")
         window.setTimeout(() => setCopyStatus("Copy"), 1200)
+      })
+  }
+
+  const submitPaste = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    if (pasteSubmitting) {
+      return
+    }
+
+    const form = event.currentTarget
+    const formData = new FormData(form)
+    const text = String(formData.get("text") ?? "")
+
+    if (!text.trim()) {
+      toast.warning("Paste is empty", {
+        description: "Add text or JSON before sending.",
+      })
+      return
+    }
+
+    setPasteSubmitting(true)
+
+    fetch("/api/paste", {
+      method: "POST",
+      body: formData,
+    })
+      .then(throwIfNotOk)
+      .then(() => {
+        form.reset()
+        toast.success("Paste sent")
+      })
+      .catch((error: unknown) => {
+        toast.error("Paste failed", {
+          description:
+            error instanceof Error ? error.message : "Could not send paste",
+        })
+      })
+      .finally(() => {
+        setPasteSubmitting(false)
+      })
+  }
+
+  const submitUpload = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    if (uploadSubmitting) {
+      return
+    }
+
+    const form = event.currentTarget
+    const formData = new FormData(form)
+    const file = formData.get("file")
+
+    if (!(file instanceof File) || file.size === 0) {
+      toast.warning("No file selected", {
+        description: "Choose a file before pressing upload.",
+      })
+      return
+    }
+
+    setUploadSubmitting(true)
+
+    fetch("/api/upload", {
+      method: "POST",
+      body: formData,
+    })
+      .then(throwIfNotOk)
+      .then(() => {
+        form.reset()
+        toast.success("File uploaded", {
+          description: file.name,
+        })
+      })
+      .catch((error: unknown) => {
+        toast.error("Upload failed", {
+          description:
+            error instanceof Error ? error.message : "Could not upload file",
+        })
+      })
+      .finally(() => {
+        setUploadSubmitting(false)
       })
   }
 
@@ -266,11 +364,15 @@ export function App() {
         setTrusted(true)
         setPairingCode("")
         setPairingStatus("")
+        toast.success("Device paired")
       })
       .catch((error: unknown) => {
-        setPairingStatus(
-          error instanceof Error ? error.message : "Pairing failed",
-        )
+        const message = error instanceof Error ? error.message : "Pairing failed"
+
+        setPairingStatus(message)
+        toast.error("Pairing failed", {
+          description: message,
+        })
       })
   }
 
@@ -388,7 +490,7 @@ export function App() {
           </CardHeader>
 
           <CardContent className="relative px-5 pb-6 sm:px-8 sm:pb-8">
-            <form className="grid gap-3" method="POST" action="/api/paste">
+            <form className="grid gap-3" onSubmit={submitPaste}>
               <Label
                 className="uppercase tracking-[0.24em] text-muted-foreground"
                 htmlFor="drop-text"
@@ -401,8 +503,12 @@ export function App() {
                 className="min-h-72 resize-y bg-background/80 p-4 font-mono text-sm leading-6"
                 placeholder='{"from": "phone", "to": "desktop"}'
               />
-              <Button className="h-11 w-full text-sm" type="submit">
-                Send paste
+              <Button
+                className="h-11 w-full text-sm"
+                type="submit"
+                disabled={pasteSubmitting}
+              >
+                {pasteSubmitting ? "Sending..." : "Send paste"}
               </Button>
             </form>
           </CardContent>
@@ -430,17 +536,19 @@ export function App() {
             <CardContent>
               <form
                 className="grid gap-3"
-                method="POST"
-                action="/api/upload"
-                encType="multipart/form-data"
+                onSubmit={submitUpload}
               >
                 <Input
                   className="h-14 border-dashed bg-background/80"
                   type="file"
                   name="file"
                 />
-                <Button className="h-11 w-full text-sm" type="submit">
-                  Upload file
+                <Button
+                  className="h-11 w-full text-sm"
+                  type="submit"
+                  disabled={uploadSubmitting}
+                >
+                  {uploadSubmitting ? "Uploading..." : "Upload file"}
                 </Button>
               </form>
             </CardContent>
@@ -641,6 +749,16 @@ function isTextPreview(item: Item) {
     item.name.endsWith(".txt") ||
     item.name.endsWith(".md")
   )
+}
+
+function throwIfNotOk(response: Response) {
+  if (response.ok) {
+    return response
+  }
+
+  return response.text().then((message) => {
+    throw new Error(message || `Request failed with ${response.status}`)
+  })
 }
 
 export default App
