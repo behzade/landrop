@@ -4,7 +4,7 @@ import { Database, type Statement } from "bun:sqlite";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { homedir, networkInterfaces } from "node:os";
 import { basename, join, resolve, sep } from "node:path";
-import { Effect, Layer, PubSub, Schedule, Stream, pipe } from "effect";
+import { Effect, Layer, Option, PubSub, Schedule, Stream, pipe } from "effect";
 
 type ItemKind = "paste" | "file";
 
@@ -492,6 +492,12 @@ const requireTrustedDevice = Effect.gen(function* () {
 
 const isTrustedRequest = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
+  const remoteAddress = Option.getOrUndefined(request.remoteAddress);
+
+  if (remoteAddress && isLoopbackAddress(remoteAddress)) {
+    return true;
+  }
+
   const token = request.cookies[TOKEN_COOKIE];
 
   if (!token) {
@@ -557,6 +563,10 @@ function constantTimeEqual(left: string, right: string) {
   const rightBytes = Buffer.from(right);
 
   return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
+}
+
+function isLoopbackAddress(address: string) {
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 }
 
 function installTerminalCleanup() {
