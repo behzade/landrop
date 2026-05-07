@@ -19,23 +19,23 @@ jobs:
           - name: linux-x64
             target: bun-linux-x64
             outfile: build/landrop-linux-x64
-            asset: landrop-linux-x64.tar.gz
+            asset: landrop-linux-x64
           - name: linux-arm64
             target: bun-linux-arm64
             outfile: build/landrop-linux-arm64
-            asset: landrop-linux-arm64.tar.gz
+            asset: landrop-linux-arm64
           - name: macos-x64
             target: bun-darwin-x64
             outfile: build/landrop-darwin-x64
-            asset: landrop-darwin-x64.tar.gz
+            asset: landrop-darwin-x64
           - name: macos-arm64
             target: bun-darwin-arm64
             outfile: build/landrop-darwin-arm64
-            asset: landrop-darwin-arm64.tar.gz
+            asset: landrop-darwin-arm64
           - name: windows-x64
             target: bun-windows-x64
             outfile: build/landrop-windows-x64.exe
-            asset: landrop-windows-x64.zip
+            asset: landrop-windows-x64.exe
 
     steps:
       - name: Checkout
@@ -55,22 +55,10 @@ jobs:
       - name: Build executable
         run: bun run build:prod -- --target=${{ matrix.target }} --outfile=${{ matrix.outfile }}
 
-      - name: Package Unix executable
-        if: ${{ !endsWith(matrix.outfile, '.exe') }}
+      - name: Prepare release asset
         run: |
-          mkdir -p release/landrop
-          cp "${{ matrix.outfile }}" release/landrop/landrop
-          cp README.md LICENSE release/landrop/
-          tar -czf "${{ matrix.asset }}" -C release landrop
-
-      - name: Package Windows executable
-        if: ${{ endsWith(matrix.outfile, '.exe') }}
-        run: |
-          mkdir -p release/landrop
-          cp "${{ matrix.outfile }}" release/landrop/landrop.exe
-          cp README.md LICENSE release/landrop/
-          cd release
-          zip -r "../${{ matrix.asset }}" landrop
+          chmod +x "${{ matrix.outfile }}"
+          cp "${{ matrix.outfile }}" "${{ matrix.asset }}"
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
