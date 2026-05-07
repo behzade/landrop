@@ -22,6 +22,7 @@ import {
 import { homedir, networkInterfaces } from "node:os"
 import { basename, join, resolve, sep } from "node:path"
 import { Effect, Layer, Option, PubSub, Schedule, Stream, pipe } from "effect"
+import { toString as qrToString } from "qrcode"
 import "./embedded-assets.generated"
 
 type ItemKind = "paste" | "file"
@@ -631,9 +632,7 @@ const Live = Layer.mergeAll(
 const program = pipe(
   ensureInbox,
   Effect.zipRight(
-    Effect.log(
-      `LAN Drop listening:\n${serverUrls().join("\n")}\nPairing code: ${PAIRING_CODE}`
-    )
+    Effect.promise(() => startupMessage()).pipe(Effect.flatMap(Effect.log))
   ),
   Effect.zipRight(HttpServer.serveEffect(app)),
   Effect.zipRight(Effect.never),
@@ -836,6 +835,27 @@ function connectUrlWithPairingCode() {
   url.searchParams.set("pairingCode", PAIRING_CODE)
 
   return url.toString()
+}
+
+async function startupMessage() {
+  const pairUrl = connectUrlWithPairingCode()
+  const qr = await qrToString(pairUrl, {
+    errorCorrectionLevel: "M",
+    margin: 1,
+    small: true,
+    type: "terminal",
+  })
+
+  return [
+    "LAN Drop is ready",
+    "",
+    "Scan this from your phone to pair and send immediately:",
+    qr.trimEnd(),
+    "",
+    `Phone URL: ${pairUrl}`,
+    `Desktop URLs: ${serverUrls().join("  ")}`,
+    `Pairing code: ${PAIRING_CODE}`,
+  ].join("\n")
 }
 
 function hashToken(token: string) {

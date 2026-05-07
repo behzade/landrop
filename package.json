@@ -11,6 +11,7 @@
     "start:server": "bun run server/main.ts",
     "build": "tsc -b && vite build",
     "build:prod": "bun run scripts/build-production.ts",
+    "install:user": "mkdir -p \"$HOME/.local/bin\" && bun run build:prod -- --outfile=\"$HOME/.local/bin/landrop\"",
     "lint": "eslint .",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",

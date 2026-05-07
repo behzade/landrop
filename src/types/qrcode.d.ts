@@ -19,8 +19,20 @@ declare module "qrcode" {
     }
   }
 
+  export type QRCodeToStringOptions = {
+    errorCorrectionLevel?: ErrorCorrectionLevel
+    margin?: number
+    small?: boolean
+    type?: "terminal" | "utf8" | "svg"
+  }
+
   export function toDataURL(
     text: string,
     options?: QRCodeToDataURLOptions
+  ): Promise<string>
+
+  export function toString(
+    text: string,
+    options?: QRCodeToStringOptions
   ): Promise<string>
 }
