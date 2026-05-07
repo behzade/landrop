@@ -927,7 +927,7 @@ export function App() {
                     <Textarea
                       id="drop-text"
                       name="text"
-                      className="min-h-64 resize-y bg-background/80 p-4 font-mono text-sm leading-6"
+                      className="min-h-64 resize-y bg-background/80 p-4 font-mono text-sm leading-6  overflow-hidden max-h-80"
                       placeholder='{"from": "phone", "to": "desktop"}'
                     />
                     <Button
