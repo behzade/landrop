@@ -4,7 +4,8 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0",
+    "dev": "bun run scripts/dev.ts",
+    "dev:web": "vite --host 0.0.0.0",
     "dev:server": "bun run server/main.ts",
     "start": "bun run build && bun run start:server",
     "start:server": "bun run server/main.ts",
