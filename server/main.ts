@@ -37,6 +37,13 @@ interface TrustedDeviceInsert {
   readonly createdAt: number;
 }
 
+interface TrustedDeviceRow {
+  readonly id: string;
+  readonly name: string;
+  readonly created_at: number;
+  readonly revoked_at: number | null;
+}
+
 type EmbeddedFile = Blob & {
   readonly name?: string;
 };
@@ -115,10 +122,21 @@ class AppDb extends Effect.Service<AppDb>()("AppDb", {
       LIMIT 1
     `);
     const selectTrustedToken = db.prepare(`
-      SELECT id
+      SELECT id, name, created_at, revoked_at
       FROM trusted_devices
       WHERE token_hash = $tokenHash AND revoked_at IS NULL
       LIMIT 1
+    `);
+    const selectTrustedDevices = db.prepare(`
+      SELECT id, name, created_at, revoked_at
+      FROM trusted_devices
+      WHERE revoked_at IS NULL
+      ORDER BY created_at DESC
+    `);
+    const updateTrustedDeviceName = db.prepare(`
+      UPDATE trusted_devices
+      SET name = $name
+      WHERE id = $id AND revoked_at IS NULL
     `);
 
     return {
@@ -126,6 +144,11 @@ class AppDb extends Effect.Service<AppDb>()("AppDb", {
       trustDevice: (device: TrustedDeviceInsert) => insertTrustedDeviceRow(insertTrustedDevice, device),
       recent: Effect.sync(() => selectRecent.all() as ItemRow[]),
       findById: (id: string) => Effect.sync(() => selectById.get({ $id: id }) as ItemRow | null),
+      trustedDevices: Effect.sync(() => selectTrustedDevices.all() as TrustedDeviceRow[]),
+      findTrustedDeviceByToken: (token: string) =>
+        Effect.sync(() => selectTrustedToken.get({ $tokenHash: hashToken(token) }) as TrustedDeviceRow | null),
+      renameTrustedDevice: (id: string, name: string) =>
+        Effect.sync(() => updateTrustedDeviceName.run({ $id: id, $name: name })),
       hasTrustedToken: (token: string) =>
         Effect.sync(() => Boolean(selectTrustedToken.get({ $tokenHash: hashToken(token) }))),
     } as const;
@@ -274,8 +297,9 @@ const handleDownloadItem = serveItemFile(true);
 
 const handleAuthStatus = Effect.gen(function* () {
   const trusted = yield* isTrustedRequest;
+  const currentDevice = yield* currentTrustedDevice;
 
-  return yield* HttpServerResponse.json({ trusted });
+  return yield* HttpServerResponse.json({ trusted, currentDevice });
 });
 
 const handlePair = Effect.gen(function* () {
@@ -293,22 +317,78 @@ const handlePair = Effect.gen(function* () {
 
   const token = randomBytes(32).toString("base64url");
   const db = yield* AppDb;
+  const id = randomUUID();
+  const name = sanitizeDeviceName(typeof body.name === "string" ? body.name : "") || "Browser";
+  const createdAt = Date.now();
 
   yield* db.trustDevice({
-    id: randomUUID(),
-    name: typeof body.name === "string" && body.name.trim() ? body.name.trim() : "Browser",
+    id,
+    name,
     tokenHash: hashToken(token),
-    createdAt: Date.now(),
+    createdAt,
   });
 
   return yield* HttpServerResponse.json(
-    { trusted: true },
+    {
+      trusted: true,
+      currentDevice: {
+        id,
+        name,
+        created_at: createdAt,
+        revoked_at: null,
+      },
+    },
     {
       headers: {
         "set-cookie": `${TOKEN_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${TOKEN_MAX_AGE_SECONDS}`,
       },
     },
   );
+});
+
+const handleDevices = Effect.gen(function* () {
+  const auth = yield* requireTrustedDevice;
+
+  if (auth) {
+    return auth;
+  }
+
+  const db = yield* AppDb;
+  const devices = yield* db.trustedDevices;
+  const currentDevice = yield* currentTrustedDevice;
+
+  return yield* HttpServerResponse.json({
+    currentDeviceId: currentDevice?.id ?? null,
+    devices,
+  });
+});
+
+const handleRenameCurrentDevice = Effect.gen(function* () {
+  const device = yield* currentTrustedDevice;
+
+  if (!device) {
+    return HttpServerResponse.text("Current request is not backed by a paired device token", { status: 400 });
+  }
+
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  const webRequest = yield* HttpServerRequest.toWeb(request);
+  const body = (yield* Effect.tryPromise(() => webRequest.json())) as {
+    readonly name?: unknown;
+  };
+  const name = sanitizeDeviceName(typeof body.name === "string" ? body.name : "");
+
+  if (!name) {
+    return HttpServerResponse.text("Device name is required", { status: 400 });
+  }
+
+  const db = yield* AppDb;
+
+  yield* db.renameTrustedDevice(device.id, name);
+
+  return yield* HttpServerResponse.json({
+    ...device,
+    name,
+  });
 });
 
 const handleConnect = HttpServerResponse.json({
@@ -419,6 +499,8 @@ const app = pipe(
   HttpRouter.post("/api/upload", handleUpload),
   HttpRouter.get("/api/auth/status", handleAuthStatus),
   HttpRouter.post("/api/pair", handlePair),
+  HttpRouter.get("/api/devices", handleDevices),
+  HttpRouter.patch("/api/devices/current", handleRenameCurrentDevice),
   HttpRouter.get("/api/items", handleItems),
   HttpRouter.get("/api/items/:id/open", handleOpenItem),
   HttpRouter.get("/api/items/:id/download", handleDownloadItem),
@@ -568,6 +650,12 @@ const requireTrustedDevice = Effect.gen(function* () {
 });
 
 const isTrustedRequest = Effect.gen(function* () {
+  const device = yield* currentTrustedDevice;
+
+  if (device) {
+    return true;
+  }
+
   const request = yield* HttpServerRequest.HttpServerRequest;
   const remoteAddress = Option.getOrUndefined(request.remoteAddress);
 
@@ -575,15 +663,20 @@ const isTrustedRequest = Effect.gen(function* () {
     return true;
   }
 
+  return false;
+});
+
+const currentTrustedDevice = Effect.gen(function* () {
+  const request = yield* HttpServerRequest.HttpServerRequest;
   const token = request.cookies[TOKEN_COOKIE];
 
   if (!token) {
-    return false;
+    return null;
   }
 
   const db = yield* AppDb;
 
-  return yield* db.hasTrustedToken(token);
+  return yield* db.findTrustedDeviceByToken(token);
 });
 
 function isInside(path: string, root: string) {
@@ -592,6 +685,10 @@ function isInside(path: string, root: string) {
 
 function escapeHeaderFilename(name: string) {
   return name.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
+function sanitizeDeviceName(name: string) {
+  return name.trim().replace(/\s+/g, " ").slice(0, 80);
 }
 
 function serverUrls() {

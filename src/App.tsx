@@ -37,6 +37,23 @@ type Item = {
   created_at: number
 }
 
+type TrustedDevice = {
+  id: string
+  name: string
+  created_at: number
+  revoked_at: number | null
+}
+
+type DevicesResponse = {
+  currentDeviceId: string | null
+  devices: TrustedDevice[]
+}
+
+type AuthStatus = {
+  trusted: boolean
+  currentDevice: TrustedDevice | null
+}
+
 type Preview =
   | { status: "idle" }
   | { status: "loading"; item: Item }
@@ -46,15 +63,21 @@ type Preview =
 type PreviewPayload = { url?: string; text?: string }
 
 const numberFormat = new Intl.NumberFormat()
+const defaultDeviceName = guessDeviceName()
 
 export function App() {
   const [items, setItems] = useState<Item[]>([])
   const [status, setStatus] = useState("Loading recent drops...")
   const [trusted, setTrusted] = useState<boolean | null>(null)
   const [pairingCode, setPairingCode] = useState("")
+  const [pairingDeviceName, setPairingDeviceName] = useState(defaultDeviceName)
   const [pairingStatus, setPairingStatus] = useState("")
   const [connectUrl, setConnectUrl] = useState("")
   const [qrDataUrl, setQrDataUrl] = useState("")
+  const [devices, setDevices] = useState<TrustedDevice[]>([])
+  const [currentDeviceId, setCurrentDeviceId] = useState<string | null>(null)
+  const [deviceName, setDeviceName] = useState(defaultDeviceName)
+  const [deviceSaving, setDeviceSaving] = useState(false)
   const [preview, setPreview] = useState<Preview>({ status: "idle" })
   const [copyStatus, setCopyStatus] = useState("Copy")
   const [pasteSubmitting, setPasteSubmitting] = useState(false)
@@ -84,10 +107,12 @@ export function App() {
       })
 
     fetch("/api/auth/status")
-      .then((response) => response.json() as Promise<{ trusted: boolean }>)
-      .then(({ trusted: nextTrusted }) => {
+      .then((response) => response.json() as Promise<AuthStatus>)
+      .then(({ trusted: nextTrusted, currentDevice }) => {
         if (!cancelled) {
           setTrusted(nextTrusted)
+          setCurrentDeviceId(currentDevice?.id ?? null)
+          setDeviceName(currentDevice?.name ?? defaultDeviceName)
         }
       })
       .catch(() => {
@@ -135,8 +160,38 @@ export function App() {
           }
         })
     }
+    const loadDevices = () => {
+      fetch("/api/devices")
+        .then(throwIfNotOk)
+        .then((response) => response.json() as Promise<DevicesResponse>)
+        .then((nextDevices) => {
+          if (!cancelled) {
+            setDevices(nextDevices.devices)
+            setCurrentDeviceId(nextDevices.currentDeviceId)
+
+            const currentDevice = nextDevices.devices.find(
+              (device) => device.id === nextDevices.currentDeviceId,
+            )
+
+            if (currentDevice) {
+              setDeviceName(currentDevice.name)
+            }
+          }
+        })
+        .catch((error: unknown) => {
+          if (!cancelled) {
+            toast.error("Could not load trusted devices", {
+              description:
+                error instanceof Error
+                  ? error.message
+                  : "Device list request failed",
+            })
+          }
+        })
+    }
 
     loadItems()
+    loadDevices()
 
     const events = new EventSource("/api/events")
     events.addEventListener("items-changed", loadItems)
@@ -350,7 +405,7 @@ export function App() {
       },
       body: JSON.stringify({
         code: pairingCode,
-        name: navigator.userAgent,
+        name: pairingDeviceName,
       }),
     })
       .then((response) => {
@@ -358,12 +413,14 @@ export function App() {
           throw new Error("Invalid pairing code")
         }
 
-        return response.json() as Promise<{ trusted: boolean }>
+        return response.json() as Promise<AuthStatus>
       })
-      .then(() => {
+      .then(({ currentDevice }) => {
         setTrusted(true)
         setPairingCode("")
         setPairingStatus("")
+        setCurrentDeviceId(currentDevice?.id ?? null)
+        setDeviceName(currentDevice?.name ?? pairingDeviceName)
         toast.success("Device paired")
       })
       .catch((error: unknown) => {
@@ -373,6 +430,53 @@ export function App() {
         toast.error("Pairing failed", {
           description: message,
         })
+      })
+  }
+
+  const submitDeviceName = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    if (deviceSaving) {
+      return
+    }
+
+    const name = deviceName.trim()
+
+    if (!name) {
+      toast.warning("Device name is required")
+      return
+    }
+
+    setDeviceSaving(true)
+
+    fetch("/api/devices/current", {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name }),
+    })
+      .then(throwIfNotOk)
+      .then((response) => response.json() as Promise<TrustedDevice>)
+      .then((updatedDevice) => {
+        setDevices((currentDevices) =>
+          currentDevices.map((device) =>
+            device.id === updatedDevice.id ? updatedDevice : device,
+          ),
+        )
+        setDeviceName(updatedDevice.name)
+        toast.success("Device name updated")
+      })
+      .catch((error: unknown) => {
+        toast.error("Could not update device name", {
+          description:
+            error instanceof Error
+              ? error.message
+              : "Device rename request failed",
+        })
+      })
+      .finally(() => {
+        setDeviceSaving(false)
       })
   }
 
@@ -414,6 +518,15 @@ export function App() {
                 placeholder="00000-00000-00000"
                 value={pairingCode}
                 onChange={(event) => setPairingCode(event.target.value)}
+              />
+              <Label htmlFor="pairing-device-name">Device name</Label>
+              <Input
+                id="pairing-device-name"
+                placeholder="Behzad's phone"
+                value={pairingDeviceName}
+                onChange={(event) =>
+                  setPairingDeviceName(event.target.value)
+                }
               />
               <Button className="h-10" type="submit">
                 Pair device
@@ -551,6 +664,78 @@ export function App() {
                   {uploadSubmitting ? "Uploading..." : "Upload file"}
                 </Button>
               </form>
+            </CardContent>
+          </Card>
+
+          <Card className="bg-card/90 shadow-xl shadow-primary/5">
+            <CardHeader>
+              <div>
+                <Badge variant="secondary" className="tracking-[0.2em]">
+                  Trusted devices
+                </Badge>
+                <CardTitle className="mt-3 text-2xl font-semibold tracking-[-0.05em]">
+                  Device identity
+                </CardTitle>
+                <CardDescription>
+                  Rename this browser so other paired devices can recognize it.
+                </CardDescription>
+              </div>
+              <CardAction>
+                <Badge variant="outline">{devices.length} trusted</Badge>
+              </CardAction>
+            </CardHeader>
+
+            <CardContent className="grid gap-4">
+              {currentDeviceId ? (
+                <form className="grid gap-2" onSubmit={submitDeviceName}>
+                  <Label htmlFor="device-name">This device name</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      id="device-name"
+                      value={deviceName}
+                      onChange={(event) => setDeviceName(event.target.value)}
+                    />
+                    <Button type="submit" disabled={deviceSaving}>
+                      {deviceSaving ? "Saving..." : "Save"}
+                    </Button>
+                  </div>
+                </form>
+              ) : (
+                <div className="border bg-muted p-3 text-xs text-muted-foreground">
+                  This localhost session is trusted automatically. Open the LAN
+                  URL and pair this browser if you want it to appear as a named
+                  device.
+                </div>
+              )}
+
+              <div className="grid gap-2">
+                {devices.map((device) => (
+                  <article
+                    className="flex items-center justify-between gap-3 border bg-background/70 p-3"
+                    key={device.id}
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">
+                        {device.name}
+                      </div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        Paired {new Date(device.created_at).toLocaleString()}
+                      </div>
+                    </div>
+                    {device.id === currentDeviceId ? (
+                      <Badge variant="default">This device</Badge>
+                    ) : (
+                      <Badge variant="outline">Trusted</Badge>
+                    )}
+                  </article>
+                ))}
+
+                {devices.length === 0 ? (
+                  <div className="border bg-muted p-3 text-xs text-muted-foreground">
+                    No token-backed devices yet.
+                  </div>
+                ) : null}
+              </div>
             </CardContent>
           </Card>
 
@@ -759,6 +944,13 @@ function throwIfNotOk(response: Response) {
   return response.text().then((message) => {
     throw new Error(message || `Request failed with ${response.status}`)
   })
+}
+
+function guessDeviceName() {
+  const platform = navigator.platform || "Browser"
+  const touch = navigator.maxTouchPoints > 1 ? "phone" : "browser"
+
+  return `${platform} ${touch}`
 }
 
 export default App
