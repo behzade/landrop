@@ -49,4 +49,6 @@ function Badge({
   })
 }
 
+// shadcn exports the variant helper for reuse by composed components.
+// eslint-disable-next-line react-refresh/only-export-components
 export { Badge, badgeVariants }

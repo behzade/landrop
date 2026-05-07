@@ -1,4 +1,36 @@
-import { type FormEvent, useEffect, useState } from "react"
+import {
+  type ChangeEvent,
+  type DragEvent,
+  type FormEvent,
+  useEffect,
+  useMemo,
+  useState,
+} from "react"
+import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react"
+import {
+  Add01Icon,
+  CheckmarkCircle02Icon,
+  ClipboardIcon,
+  ClipboardCopyIcon,
+  ComputerPhoneSyncIcon,
+  Download04Icon,
+  File02Icon,
+  FileUploadIcon,
+  FolderUploadIcon,
+  Image01Icon,
+  InboxIcon,
+  Key01Icon,
+  Loading03Icon,
+  MusicNote01Icon,
+  QrCodeScanIcon,
+  Search01Icon,
+  SentIcon,
+  Shield01Icon,
+  Sorting01Icon,
+  TextIcon,
+  Upload04Icon,
+  UserAccountIcon,
+} from "@hugeicons/core-free-icons"
 import { toDataURL } from "qrcode"
 import { toast } from "sonner"
 
@@ -24,8 +56,9 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Separator } from "@/components/ui/separator"
 import { Textarea } from "@/components/ui/textarea"
+import landropLogoUrl from "@/assets/landrop.svg"
+import { cn } from "@/lib/utils"
 
 type Item = {
   id: string
@@ -61,15 +94,45 @@ type Preview =
   | { status: "error"; item: Item; message: string }
 
 type PreviewPayload = { url?: string; text?: string }
+type InboxFilter = "all" | "text" | "files" | "images" | "audio"
+type SortKey = "newest" | "oldest" | "name" | "size"
+type UploadTab = "text" | "file" | "clipboard"
 
 const numberFormat = new Intl.NumberFormat()
 const defaultDeviceName = guessDeviceName()
+const initialUrlPairingCode = getPairingCodeFromUrl()
+const pairingCodePattern = /^\d{5}-\d{5}-\d{5}$/
+const inboxFilters: Array<{
+  icon: IconSvgElement
+  key: InboxFilter
+  label: string
+}> = [
+  { key: "all", label: "All", icon: InboxIcon },
+  { key: "text", label: "Text", icon: TextIcon },
+  { key: "files", label: "Files", icon: File02Icon },
+  { key: "images", label: "Images", icon: Image01Icon },
+  { key: "audio", label: "Audio", icon: MusicNote01Icon },
+]
+
+const sortLabels: Record<SortKey, string> = {
+  newest: "Newest first",
+  oldest: "Oldest first",
+  name: "Name",
+  size: "Largest",
+}
 
 export function App() {
   const [items, setItems] = useState<Item[]>([])
   const [status, setStatus] = useState("Loading recent drops...")
   const [trusted, setTrusted] = useState<boolean | null>(null)
-  const [pairingCode, setPairingCode] = useState("")
+  const [pairingCode, setPairingCode] = useState(initialUrlPairingCode)
+  const [pairingCodeSource, setPairingCodeSource] = useState<"manual" | "url">(
+    initialUrlPairingCode ? "url" : "manual"
+  )
+  const [pairingCodeValidating, setPairingCodeValidating] = useState(
+    Boolean(initialUrlPairingCode)
+  )
+  const [pairingCodeValidated, setPairingCodeValidated] = useState(false)
   const [pairingDeviceName, setPairingDeviceName] = useState(defaultDeviceName)
   const [pairingStatus, setPairingStatus] = useState("")
   const [connectUrl, setConnectUrl] = useState("")
@@ -83,15 +146,43 @@ export function App() {
   const [copyStatus, setCopyStatus] = useState("Copy")
   const [pasteSubmitting, setPasteSubmitting] = useState(false)
   const [uploadSubmitting, setUploadSubmitting] = useState(false)
+  const [sendOpen, setSendOpen] = useState(false)
+  const [uploadTab, setUploadTab] = useState<UploadTab>("text")
+  const [inboxFilter, setInboxFilter] = useState<InboxFilter>("all")
+  const [sortKey, setSortKey] = useState<SortKey>("newest")
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [dropActive, setDropActive] = useState(false)
 
   useEffect(() => {
     let cancelled = false
-    const codeFromUrl = new URLSearchParams(window.location.search).get(
-      "pairingCode",
-    )
 
-    if (codeFromUrl) {
-      setPairingCode(codeFromUrl)
+    if (initialUrlPairingCode) {
+      fetch(
+        `/api/pairing-code?code=${encodeURIComponent(initialUrlPairingCode)}`
+      )
+        .then(throwIfNotOk)
+        .then((response) => response.json() as Promise<{ valid: boolean }>)
+        .then(({ valid }) => {
+          if (!cancelled) {
+            setPairingCodeValidated(valid)
+            setPairingStatus(
+              valid
+                ? "Pairing code accepted. Name this device to finish."
+                : "The pairing link is invalid or expired."
+            )
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setPairingCodeValidated(false)
+            setPairingStatus("Could not validate the pairing link.")
+          }
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setPairingCodeValidating(false)
+          }
+        })
     }
 
     fetch("/api/connect")
@@ -171,7 +262,7 @@ export function App() {
             setCurrentDeviceId(nextDevices.currentDeviceId)
 
             const currentDevice = nextDevices.devices.find(
-              (device) => device.id === nextDevices.currentDeviceId,
+              (device) => device.id === nextDevices.currentDeviceId
             )
 
             if (currentDevice) {
@@ -212,7 +303,6 @@ export function App() {
     let cancelled = false
 
     if (!connectUrl) {
-      setQrDataUrl("")
       return
     }
 
@@ -249,6 +339,55 @@ export function App() {
     }
   }, [preview])
 
+  const itemCounts = useMemo(
+    () => ({
+      all: items.length,
+      text: items.filter(isTextPreview).length,
+      files: items.filter((item) => item.kind === "file").length,
+      images: items.filter(isImagePreview).length,
+      audio: items.filter(isAudioPreview).length,
+    }),
+    [items]
+  )
+
+  const visibleItems = useMemo(() => {
+    const filtered = items.filter((item) => {
+      if (inboxFilter === "text") {
+        return isTextPreview(item)
+      }
+
+      if (inboxFilter === "files") {
+        return item.kind === "file"
+      }
+
+      if (inboxFilter === "images") {
+        return isImagePreview(item)
+      }
+
+      if (inboxFilter === "audio") {
+        return isAudioPreview(item)
+      }
+
+      return true
+    })
+
+    return [...filtered].sort((left, right) => {
+      if (sortKey === "oldest") {
+        return left.created_at - right.created_at
+      }
+
+      if (sortKey === "name") {
+        return left.name.localeCompare(right.name)
+      }
+
+      if (sortKey === "size") {
+        return right.size - left.size
+      }
+
+      return right.created_at - left.created_at
+    })
+  }, [inboxFilter, items, sortKey])
+
   const openPreview = (item: Item) => {
     setCopyStatus("Copy")
     setPreview((current) => {
@@ -281,7 +420,8 @@ export function App() {
         setPreview({ ...nextPreview, status: "ready", item })
       })
       .catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : "Failed to load"
+        const message =
+          error instanceof Error ? error.message : "Failed to load"
 
         setPreview({
           status: "error",
@@ -340,6 +480,7 @@ export function App() {
       .then(throwIfNotOk)
       .then(() => {
         form.reset()
+        setSendOpen(false)
         toast.success("Paste sent")
       })
       .catch((error: unknown) => {
@@ -362,7 +503,7 @@ export function App() {
 
     const form = event.currentTarget
     const formData = new FormData(form)
-    const file = formData.get("file")
+    const file = selectedFile ?? formData.get("file")
 
     if (!(file instanceof File) || file.size === 0) {
       toast.warning("No file selected", {
@@ -371,32 +512,111 @@ export function App() {
       return
     }
 
+    uploadFile(file).then((uploaded) => {
+      if (uploaded) {
+        form.reset()
+        setSelectedFile(null)
+      }
+    })
+  }
+
+  const uploadFile = (file: File) => {
     setUploadSubmitting(true)
 
-    fetch("/api/upload", {
+    const formData = new FormData()
+    formData.set("file", file)
+
+    return fetch("/api/upload", {
       method: "POST",
       body: formData,
     })
       .then(throwIfNotOk)
       .then(() => {
-        form.reset()
         toast.success("File uploaded", {
           description: file.name,
         })
+        setSendOpen(false)
+        return true
       })
       .catch((error: unknown) => {
         toast.error("Upload failed", {
           description:
             error instanceof Error ? error.message : "Could not upload file",
         })
+        return false
       })
       .finally(() => {
         setUploadSubmitting(false)
       })
   }
 
+  const selectUploadFile = (event: ChangeEvent<HTMLInputElement>) => {
+    setSelectedFile(event.target.files?.[0] ?? null)
+  }
+
+  const dropUploadFile = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    setDropActive(false)
+
+    const file = event.dataTransfer.files[0]
+
+    if (file) {
+      setSelectedFile(file)
+    }
+  }
+
+  const uploadClipboardImage = async () => {
+    if (uploadSubmitting) {
+      return
+    }
+
+    if (!navigator.clipboard?.read) {
+      toast.error("Clipboard images are not available in this browser")
+      return
+    }
+
+    try {
+      const entries = await navigator.clipboard.read()
+
+      for (const entry of entries) {
+        const imageType = entry.types.find((type) => type.startsWith("image/"))
+
+        if (!imageType) {
+          continue
+        }
+
+        const blob = await entry.getType(imageType)
+        const extension = imageType.split("/")[1] || "png"
+        const file = new File([blob], `clipboard-image.${extension}`, {
+          type: imageType,
+        })
+
+        await uploadFile(file)
+        return
+      }
+
+      toast.warning("No image found on clipboard")
+    } catch (error) {
+      toast.error("Could not read clipboard image", {
+        description:
+          error instanceof Error ? error.message : "Clipboard access failed",
+      })
+    }
+  }
+
   const submitPairing = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+
+    if (!pairingCodePattern.test(pairingCode.trim())) {
+      setPairingStatus("Enter a code in the 00000-00000-00000 format.")
+      return
+    }
+
+    if (!pairingDeviceName.trim()) {
+      setPairingStatus("Device name is required.")
+      return
+    }
+
     setPairingStatus("Pairing...")
 
     fetch("/api/pair", {
@@ -419,13 +639,16 @@ export function App() {
       .then(({ currentDevice }) => {
         setTrusted(true)
         setPairingCode("")
+        setPairingCodeSource("manual")
+        setPairingCodeValidated(false)
         setPairingStatus("")
         setCurrentDeviceId(currentDevice?.id ?? null)
         setDeviceName(currentDevice?.name ?? pairingDeviceName)
         toast.success("Device paired")
       })
       .catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : "Pairing failed"
+        const message =
+          error instanceof Error ? error.message : "Pairing failed"
 
         setPairingStatus(message)
         toast.error("Pairing failed", {
@@ -462,8 +685,8 @@ export function App() {
       .then((updatedDevice) => {
         setDevices((currentDevices) =>
           currentDevices.map((device) =>
-            device.id === updatedDevice.id ? updatedDevice : device,
-          ),
+            device.id === updatedDevice.id ? updatedDevice : device
+          )
         )
         setDeviceName(updatedDevice.name)
         toast.success("Device name updated")
@@ -494,7 +717,9 @@ export function App() {
       .then(throwIfNotOk)
       .then(() => {
         setDevices((currentDevices) =>
-          currentDevices.filter((currentDevice) => currentDevice.id !== device.id),
+          currentDevices.filter(
+            (currentDevice) => currentDevice.id !== device.id
+          )
         )
 
         if (device.id === currentDeviceId) {
@@ -522,8 +747,14 @@ export function App() {
   if (trusted === null) {
     return (
       <main className="grid min-h-svh place-items-center bg-background p-4 text-foreground">
-        <Card className="w-full max-w-sm">
+        <Card className="w-full max-w-sm border-border/80 bg-card shadow-lg">
           <CardHeader>
+            <div className="mb-2 flex size-10 items-center justify-center border bg-muted">
+              <AppIcon
+                icon={Loading03Icon}
+                className="animate-spin text-primary"
+              />
+            </div>
             <CardTitle>LAN Drop</CardTitle>
             <CardDescription>Checking trusted device status...</CardDescription>
           </CardHeader>
@@ -533,42 +764,85 @@ export function App() {
   }
 
   if (!trusted) {
+    const pairingLinkReady =
+      pairingCodeSource === "url" &&
+      pairingCodeValidated &&
+      !pairingCodeValidating
+
     return (
-      <main className="grid min-h-svh place-items-center bg-[radial-gradient(circle_at_0%_0%,oklch(0.879_0.169_91.605/.35),transparent_28rem),linear-gradient(135deg,var(--background),var(--muted))] p-4 text-foreground">
-        <Card className="w-full max-w-md bg-card/90 shadow-2xl shadow-primary/10">
+      <main className="grid min-h-svh place-items-center bg-background p-4 text-foreground">
+        <Card className="w-full max-w-md border-border/80 bg-card shadow-xl">
           <CardHeader>
-            <Badge variant="outline" className="w-fit tracking-[0.24em]">
+            <Badge
+              variant={pairingLinkReady ? "default" : "outline"}
+              className="w-fit"
+            >
+              <AppIcon
+                icon={pairingLinkReady ? CheckmarkCircle02Icon : Key01Icon}
+              />
               Pair device
             </Badge>
-            <CardTitle className="text-3xl tracking-[-0.06em]">
-              Trust this browser
+            <CardTitle className="text-3xl">
+              {pairingLinkReady ? "Name this device" : "Trust this browser"}
             </CardTitle>
             <CardDescription>
-              Enter the pairing code printed in the desktop server console.
+              {pairingLinkReady
+                ? "The pairing link is valid. Choose a recognizable name for this browser."
+                : "Enter the pairing code printed in the desktop server console."}
             </CardDescription>
           </CardHeader>
           <CardContent>
             <form className="grid gap-3" onSubmit={submitPairing}>
-              <Label htmlFor="pairing-code">Pairing code</Label>
-              <Input
-                autoComplete="one-time-code"
-                id="pairing-code"
-                inputMode="numeric"
-                placeholder="00000-00000-00000"
-                value={pairingCode}
-                onChange={(event) => setPairingCode(event.target.value)}
-              />
+              {pairingLinkReady ? null : (
+                <>
+                  <Label htmlFor="pairing-code">Pairing code</Label>
+                  <div className="relative">
+                    <AppIcon
+                      icon={pairingCodeValidating ? Loading03Icon : Key01Icon}
+                      className={cn(
+                        "absolute top-1/2 left-3 -translate-y-1/2 text-muted-foreground",
+                        pairingCodeValidating && "animate-spin"
+                      )}
+                    />
+                    <Input
+                      autoComplete="one-time-code"
+                      className="pl-9"
+                      disabled={pairingCodeValidating}
+                      id="pairing-code"
+                      inputMode="numeric"
+                      placeholder="00000-00000-00000"
+                      value={pairingCode}
+                      onChange={(event) => {
+                        setPairingCode(event.target.value)
+                        setPairingCodeSource("manual")
+                        setPairingCodeValidated(false)
+                      }}
+                    />
+                  </div>
+                </>
+              )}
               <Label htmlFor="pairing-device-name">Device name</Label>
-              <Input
-                id="pairing-device-name"
-                placeholder="Behzad's phone"
-                value={pairingDeviceName}
-                onChange={(event) =>
-                  setPairingDeviceName(event.target.value)
-                }
-              />
-              <Button className="h-10" type="submit">
-                Pair device
+              <div className="relative">
+                <AppIcon
+                  icon={UserAccountIcon}
+                  className="absolute top-1/2 left-3 -translate-y-1/2 text-muted-foreground"
+                />
+                <Input
+                  autoFocus={pairingLinkReady}
+                  className="pl-9"
+                  id="pairing-device-name"
+                  placeholder="Behzad's phone"
+                  value={pairingDeviceName}
+                  onChange={(event) => setPairingDeviceName(event.target.value)}
+                />
+              </div>
+              <Button
+                className="h-10"
+                type="submit"
+                disabled={pairingCodeValidating}
+              >
+                <AppIcon icon={Shield01Icon} />
+                {pairingLinkReady ? "Finish pairing" : "Pair device"}
               </Button>
               {pairingStatus ? (
                 <p className="text-xs text-muted-foreground">{pairingStatus}</p>
@@ -581,319 +855,475 @@ export function App() {
   }
 
   return (
-    <main className="min-h-svh overflow-hidden bg-[radial-gradient(circle_at_0%_0%,oklch(0.879_0.169_91.605/.35),transparent_28rem),radial-gradient(circle_at_100%_20%,oklch(0.52_0.105_223.128/.18),transparent_24rem),linear-gradient(135deg,var(--background),var(--muted))] px-4 py-5 text-foreground sm:px-8 sm:py-8">
-      <div className="mx-auto mb-3 flex max-w-6xl justify-end gap-2">
-        <Dialog>
-          <DialogTrigger
-            render={
-              <Button className="h-9 px-3 text-xs" type="button" variant="outline" />
-            }
-          >
-            Devices
-          </DialogTrigger>
-          <DialogContent className="max-h-[calc(100svh-2rem)] overflow-hidden sm:max-w-xl">
-            <DialogHeader>
-              <DialogTitle>Trusted browsers</DialogTitle>
-              <DialogDescription>
-                Rename this browser or revoke paired devices.
-              </DialogDescription>
-            </DialogHeader>
+    <main className="min-h-svh bg-background px-3 py-3 text-foreground sm:px-5">
+      <div className="mx-auto mb-3 flex max-w-7xl items-center justify-between gap-3 border-b pb-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <img alt="" className="size-8 shrink-0" src={landropLogoUrl} />
+          <div className="min-w-0">
+            <h1 className="truncate text-base font-semibold">LAN Drop</h1>
+            <p className="truncate text-xs text-muted-foreground">
+              {numberFormat.format(visibleItems.length)} shown of{" "}
+              {numberFormat.format(items.length)}
+            </p>
+          </div>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <Dialog open={sendOpen} onOpenChange={setSendOpen}>
+            <DialogTrigger
+              render={
+                <Button
+                  className="h-9 px-3 text-xs"
+                  type="button"
+                  variant="default"
+                />
+              }
+            >
+              <AppIcon icon={Add01Icon} />
+              New drop
+            </DialogTrigger>
+            <DialogContent className="max-h-[calc(100svh-2rem)] overflow-hidden sm:max-w-2xl">
+              <DialogHeader>
+                <DialogTitle>Add to inbox</DialogTitle>
+                <DialogDescription>
+                  Send text, upload a file, or pull an image from the clipboard.
+                </DialogDescription>
+              </DialogHeader>
 
-            <div className="grid gap-4 overflow-hidden">
-              {currentDeviceId ? (
-                <form className="grid gap-2" onSubmit={submitDeviceName}>
-                  <Label
-                    className="uppercase tracking-[0.2em] text-muted-foreground"
-                    htmlFor="device-name"
-                  >
-                    This device
-                  </Label>
-                  <div className="flex gap-2">
-                    <Input
-                      className="min-w-0 bg-background/80"
-                      id="device-name"
-                      value={deviceName}
-                      onChange={(event) => setDeviceName(event.target.value)}
+              <div className="grid gap-4 overflow-hidden">
+                <div className="grid grid-cols-3 border">
+                  {[
+                    { key: "text", label: "Text", icon: TextIcon },
+                    { key: "file", label: "File", icon: FolderUploadIcon },
+                    {
+                      key: "clipboard",
+                      label: "Clipboard",
+                      icon: ClipboardIcon,
+                    },
+                  ].map((tab) => (
+                    <button
+                      className={cn(
+                        "flex h-10 items-center justify-center gap-2 border-r text-xs last:border-r-0 hover:bg-muted",
+                        uploadTab === tab.key && "bg-muted text-foreground"
+                      )}
+                      key={tab.key}
+                      type="button"
+                      onClick={() => setUploadTab(tab.key as UploadTab)}
+                    >
+                      <AppIcon icon={tab.icon} />
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+
+                {uploadTab === "text" ? (
+                  <form className="grid gap-3" onSubmit={submitPaste}>
+                    <Label
+                      className="flex items-center gap-2 text-muted-foreground uppercase"
+                      htmlFor="drop-text"
+                    >
+                      <AppIcon icon={TextIcon} />
+                      Paste text / JSON
+                    </Label>
+                    <Textarea
+                      id="drop-text"
+                      name="text"
+                      className="min-h-64 resize-y bg-background/80 p-4 font-mono text-sm leading-6"
+                      placeholder='{"from": "phone", "to": "desktop"}'
                     />
                     <Button
-                      className="shrink-0"
+                      className="h-11 w-full text-sm"
                       type="submit"
-                      disabled={deviceSaving}
+                      disabled={pasteSubmitting}
                     >
-                      {deviceSaving ? "Saving..." : "Save"}
+                      <AppIcon icon={SentIcon} />
+                      {pasteSubmitting ? "Sending..." : "Send paste"}
+                    </Button>
+                  </form>
+                ) : null}
+
+                {uploadTab === "file" ? (
+                  <form className="grid gap-3" onSubmit={submitUpload}>
+                    <div
+                      className={cn(
+                        "grid min-h-44 place-items-center border border-dashed bg-muted/40 p-6 text-center transition-colors",
+                        dropActive && "border-primary bg-primary/10"
+                      )}
+                      onDragLeave={() => setDropActive(false)}
+                      onDragOver={(event) => {
+                        event.preventDefault()
+                        setDropActive(true)
+                      }}
+                      onDrop={dropUploadFile}
+                    >
+                      <div className="grid gap-3">
+                        <div className="mx-auto flex size-12 items-center justify-center border bg-background">
+                          <AppIcon
+                            icon={Upload04Icon}
+                            className="size-5 text-primary"
+                          />
+                        </div>
+                        <div>
+                          <p className="text-sm font-medium">
+                            {selectedFile
+                              ? selectedFile.name
+                              : "Drop a file here"}
+                          </p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {selectedFile
+                              ? `${numberFormat.format(selectedFile.size)} bytes`
+                              : "or choose a file from this device"}
+                          </p>
+                        </div>
+                        <Input
+                          className="h-10 bg-background"
+                          type="file"
+                          name="file"
+                          onChange={selectUploadFile}
+                        />
+                      </div>
+                    </div>
+                    <Button
+                      className="h-11 w-full text-sm"
+                      type="submit"
+                      disabled={uploadSubmitting}
+                    >
+                      <AppIcon icon={FileUploadIcon} />
+                      {uploadSubmitting ? "Uploading..." : "Upload file"}
+                    </Button>
+                  </form>
+                ) : null}
+
+                {uploadTab === "clipboard" ? (
+                  <div className="grid gap-3">
+                    <div className="grid min-h-56 place-items-center border bg-muted/40 p-6 text-center">
+                      <div className="grid gap-3">
+                        <div className="mx-auto flex size-12 items-center justify-center border bg-background">
+                          <AppIcon
+                            icon={Image01Icon}
+                            className="size-5 text-primary"
+                          />
+                        </div>
+                        <div>
+                          <p className="text-sm font-medium">
+                            Upload clipboard image
+                          </p>
+                          <p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">
+                            Copy an image or screenshot, then let LAN Drop read
+                            it from the browser clipboard.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                    <Button
+                      className="h-11 w-full text-sm"
+                      type="button"
+                      disabled={uploadSubmitting}
+                      onClick={uploadClipboardImage}
+                    >
+                      <AppIcon icon={ClipboardCopyIcon} />
+                      {uploadSubmitting
+                        ? "Uploading..."
+                        : "Upload image from clipboard"}
                     </Button>
                   </div>
-                </form>
-              ) : devices.length === 0 ? (
-                <p className="border bg-muted p-3 text-xs leading-5 text-muted-foreground">
-                  Localhost is trusted automatically. Open the LAN URL and pair
-                  this browser if you want a named device.
-                </p>
-              ) : (
-                <p className="text-xs leading-5 text-muted-foreground">
-                  Localhost is auto-trusted. Rename from the paired LAN browser.
-                </p>
-              )}
-
-              <ScrollArea className="max-h-[50svh]">
-                <div className="grid gap-2 pr-3">
-                  {devices.map((device) => (
-                    <article
-                      className="grid grid-cols-[1fr_auto] items-center gap-3 border bg-background/70 p-3"
-                      key={device.id}
-                    >
-                      <div className="min-w-0">
-                        <div
-                          className="truncate text-sm font-medium"
-                          title={device.name}
-                        >
-                          {device.name}
-                        </div>
-                        <div className="mt-1 truncate text-xs text-muted-foreground">
-                          Paired {new Date(device.created_at).toLocaleString()}
-                        </div>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-2">
-                        {device.id === currentDeviceId ? (
-                          <Badge variant="default">This</Badge>
-                        ) : (
-                          <Badge variant="outline">Trusted</Badge>
-                        )}
-                        <Button
-                          size="xs"
-                          type="button"
-                          variant="destructive"
-                          disabled={revokingDeviceId === device.id}
-                          onClick={() => revokeDevice(device)}
-                        >
-                          {revokingDeviceId === device.id ? "..." : "Revoke"}
-                        </Button>
-                      </div>
-                    </article>
-                  ))}
-
-                  {devices.length === 0 ? (
-                    <div className="border bg-muted p-3 text-xs text-muted-foreground">
-                      No token-backed devices yet.
-                    </div>
-                  ) : null}
-                </div>
-              </ScrollArea>
-            </div>
-
-            <DialogFooter showCloseButton />
-          </DialogContent>
-        </Dialog>
-
-        <Dialog>
-          <DialogTrigger
-            render={
-              <Button
-                aria-label="Connect phone"
-                className="text-lg"
-                size="icon-lg"
-                type="button"
-              />
-            }
-          >
-            +
-          </DialogTrigger>
-          <DialogContent className="sm:max-w-md">
-            <DialogHeader>
-              <DialogTitle>Connect phone</DialogTitle>
-              <DialogDescription>
-                Scan this QR code from your phone on the same Wi-Fi.
-              </DialogDescription>
-            </DialogHeader>
-
-            <div className="grid gap-4">
-              <div className="mx-auto border bg-white p-4">
-                {qrDataUrl ? (
-                  <img
-                    alt={`QR code for ${connectUrl}`}
-                    className="size-64"
-                    src={qrDataUrl}
-                  />
-                ) : (
-                  <div className="grid size-64 place-items-center text-xs text-black">
-                    Generating QR...
-                  </div>
-                )}
+                ) : null}
               </div>
+            </DialogContent>
+          </Dialog>
 
-              <a
-                className="break-all border bg-muted px-3 py-2 text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-                href={connectUrl}
-              >
-                {connectUrl || "Loading LAN address..."}
-              </a>
-            </div>
-
-            <DialogFooter showCloseButton />
-          </DialogContent>
-        </Dialog>
-      </div>
-
-      <div className="mx-auto grid max-w-6xl gap-5 lg:grid-cols-[1.05fr_0.95fr]">
-        <Card className="relative min-h-[calc(100svh-2.5rem)] justify-between bg-card/90 py-0 shadow-2xl shadow-primary/10 backdrop-blur">
-          <div className="absolute -right-20 -top-20 h-56 w-56 rounded-full bg-primary/10 blur-3xl" />
-
-          <CardHeader className="relative px-5 pt-6 sm:px-8 sm:pt-8">
-            <Badge variant="outline" className="w-fit tracking-[0.24em]">
-              Local receiver
-            </Badge>
-            <CardTitle className="mt-4 max-w-xl text-5xl font-semibold tracking-[-0.08em] text-balance sm:text-7xl">
-              LAN Drop
-            </CardTitle>
-            <CardDescription className="mt-2 max-w-xl text-sm leading-6 sm:text-base">
-              Send JSON, notes, screenshots, and files from your phone to this
-              desktop without a chat app or cloud hop.
-            </CardDescription>
-          </CardHeader>
-
-          <CardContent className="relative px-5 pb-6 sm:px-8 sm:pb-8">
-            <form className="grid gap-3" onSubmit={submitPaste}>
-              <Label
-                className="uppercase tracking-[0.24em] text-muted-foreground"
-                htmlFor="drop-text"
-              >
-                Paste text / JSON
-              </Label>
-              <Textarea
-                id="drop-text"
-                name="text"
-                className="min-h-72 resize-y bg-background/80 p-4 font-mono text-sm leading-6"
-                placeholder='{"from": "phone", "to": "desktop"}'
-              />
-              <Button
-                className="h-11 w-full text-sm"
-                type="submit"
-                disabled={pasteSubmitting}
-              >
-                {pasteSubmitting ? "Sending..." : "Send paste"}
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
-
-        <div className="grid content-start gap-5">
-          <Card className="bg-card/90 shadow-xl shadow-primary/5">
-            <CardHeader>
-              <div>
-                <Badge variant="secondary" className="tracking-[0.2em]">
-                  File upload
-                </Badge>
-                <CardTitle className="mt-3 text-2xl font-semibold tracking-[-0.05em]">
-                  Push a file
-                </CardTitle>
-                <CardDescription>
-                  Stored under ~/Downloads/landrop/uploads.
-                </CardDescription>
-              </div>
-              <CardAction>
-                <Badge variant="outline">LAN only</Badge>
-              </CardAction>
-            </CardHeader>
-
-            <CardContent>
-              <form
-                className="grid gap-3"
-                onSubmit={submitUpload}
-              >
-                <Input
-                  className="h-14 border-dashed bg-background/80"
-                  type="file"
-                  name="file"
-                />
+          <Dialog>
+            <DialogTrigger
+              render={
                 <Button
-                  className="h-11 w-full text-sm"
-                  type="submit"
-                  disabled={uploadSubmitting}
-                >
-                  {uploadSubmitting ? "Uploading..." : "Upload file"}
-                </Button>
-              </form>
-            </CardContent>
-          </Card>
-
-          <Card className="bg-card/90 shadow-xl shadow-primary/5">
-            <CardHeader>
-              <div>
-                <Badge variant="secondary" className="tracking-[0.2em]">
-                  Inbox
-                </Badge>
-                <CardTitle className="mt-3 text-2xl font-semibold tracking-[-0.05em]">
-                  {status}
-                </CardTitle>
-              </div>
-              <CardAction>
-                <Button
+                  className="h-9 px-3 text-xs"
+                  type="button"
                   variant="outline"
-                  size="sm"
-                  render={<a href="/api/items">JSON</a>}
                 />
-              </CardAction>
-            </CardHeader>
+              }
+            >
+              <AppIcon icon={ComputerPhoneSyncIcon} />
+              Devices
+            </DialogTrigger>
+            <DialogContent className="max-h-[calc(100svh-2rem)] overflow-hidden sm:max-w-xl">
+              <DialogHeader>
+                <DialogTitle>Trusted browsers</DialogTitle>
+                <DialogDescription>
+                  Rename this browser or revoke paired devices.
+                </DialogDescription>
+              </DialogHeader>
 
-            <CardContent>
-              <ScrollArea className="h-[24rem]">
-                <div className="grid gap-2 pr-3">
-                  {items.slice(0, 16).map((item, index) => (
-                    <article
-                      className="grid grid-cols-[auto_1fr] gap-3 border bg-background/70 p-3"
-                      key={item.id}
+              <div className="grid gap-4 overflow-hidden">
+                {currentDeviceId ? (
+                  <form className="grid gap-2" onSubmit={submitDeviceName}>
+                    <Label
+                      className="tracking-[0.2em] text-muted-foreground uppercase"
+                      htmlFor="device-name"
                     >
-                      <Badge
-                        className="flex size-10 items-center justify-center px-0 uppercase"
-                        variant={item.kind === "paste" ? "default" : "outline"}
+                      This device
+                    </Label>
+                    <div className="flex gap-2">
+                      <Input
+                        className="min-w-0 bg-background/80"
+                        id="device-name"
+                        value={deviceName}
+                        onChange={(event) => setDeviceName(event.target.value)}
+                      />
+                      <Button
+                        className="shrink-0"
+                        type="submit"
+                        disabled={deviceSaving}
                       >
-                        {item.kind === "paste" ? "txt" : "file"}
-                      </Badge>
-                      <div className="min-w-0">
-                        <div className="flex min-w-0 items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="truncate text-sm font-medium">
-                              {item.name}
-                            </div>
-                            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                              <span>{numberFormat.format(item.size)} bytes</span>
-                              <span>
-                                {new Date(item.created_at).toLocaleString()}
-                              </span>
-                            </div>
+                        {deviceSaving ? "Saving..." : "Save"}
+                      </Button>
+                    </div>
+                  </form>
+                ) : devices.length === 0 ? (
+                  <p className="border bg-muted p-3 text-xs leading-5 text-muted-foreground">
+                    Localhost is trusted automatically. Open the LAN URL and
+                    pair this browser if you want a named device.
+                  </p>
+                ) : (
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    Localhost is auto-trusted. Rename from the paired LAN
+                    browser.
+                  </p>
+                )}
+
+                <ScrollArea className="max-h-[50svh]">
+                  <div className="grid gap-2 pr-3">
+                    {devices.map((device) => (
+                      <article
+                        className="grid grid-cols-[1fr_auto] items-center gap-3 border bg-background/70 p-3"
+                        key={device.id}
+                      >
+                        <div className="min-w-0">
+                          <div
+                            className="truncate text-sm font-medium"
+                            title={device.name}
+                          >
+                            {device.name}
                           </div>
-                          <div className="flex shrink-0 gap-1">
-                            <Button
-                              variant="ghost"
-                              size="xs"
-                              type="button"
-                              onClick={() => openPreview(item)}
-                            >
-                              Open
-                            </Button>
-                            <Button
-                              variant="outline"
-                              size="xs"
-                              render={
-                                <a href={`/api/items/${item.id}/download`}>
-                                  Save
-                                </a>
-                              }
-                            />
+                          <div className="mt-1 truncate text-xs text-muted-foreground">
+                            Paired{" "}
+                            {new Date(device.created_at).toLocaleString()}
                           </div>
                         </div>
-                        {index < Math.min(items.length, 16) - 1 ? (
-                          <Separator className="mt-3" />
-                        ) : null}
+                        <div className="flex shrink-0 items-center gap-2">
+                          {device.id === currentDeviceId ? (
+                            <Badge variant="default">
+                              <AppIcon icon={CheckmarkCircle02Icon} />
+                              This
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline">
+                              <AppIcon icon={Shield01Icon} />
+                              Trusted
+                            </Badge>
+                          )}
+                          <Button
+                            size="xs"
+                            type="button"
+                            variant="destructive"
+                            disabled={revokingDeviceId === device.id}
+                            onClick={() => revokeDevice(device)}
+                          >
+                            {revokingDeviceId === device.id ? "..." : "Revoke"}
+                          </Button>
+                        </div>
+                      </article>
+                    ))}
+
+                    {devices.length === 0 ? (
+                      <div className="border bg-muted p-3 text-xs text-muted-foreground">
+                        No token-backed devices yet.
                       </div>
-                    </article>
-                  ))}
+                    ) : null}
+                  </div>
+                </ScrollArea>
+              </div>
+
+              <DialogFooter showCloseButton />
+            </DialogContent>
+          </Dialog>
+
+          <Dialog>
+            <DialogTrigger
+              render={
+                <Button
+                  aria-label="Connect phone"
+                  className="h-9 px-3 text-xs"
+                  type="button"
+                  variant="default"
+                />
+              }
+            >
+              <AppIcon icon={QrCodeScanIcon} />
+              Connect
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-md">
+              <DialogHeader>
+                <DialogTitle>Connect phone</DialogTitle>
+                <DialogDescription>
+                  Scan this QR code from your phone on the same Wi-Fi.
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="grid gap-4">
+                <div className="mx-auto border bg-white p-4">
+                  {qrDataUrl ? (
+                    <img
+                      alt={`QR code for ${connectUrl}`}
+                      className="size-64"
+                      src={qrDataUrl}
+                    />
+                  ) : (
+                    <div className="grid size-64 place-items-center text-xs text-black">
+                      Generating QR...
+                    </div>
+                  )}
                 </div>
-              </ScrollArea>
-            </CardContent>
-          </Card>
+
+                <a
+                  className="border bg-muted px-3 py-2 text-xs break-all text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+                  href={connectUrl}
+                >
+                  {connectUrl || "Loading LAN address..."}
+                </a>
+              </div>
+
+              <DialogFooter showCloseButton />
+            </DialogContent>
+          </Dialog>
         </div>
       </div>
+
+      <Card className="mx-auto max-w-7xl border-border/80 bg-card shadow-sm">
+        <CardHeader className="gap-3 p-3 sm:p-4">
+          <div className="min-w-0">
+            <CardTitle className="truncate text-xl font-semibold">
+              {status}
+            </CardTitle>
+          </div>
+          <CardAction>
+            <Button
+              variant="outline"
+              size="sm"
+              render={
+                <a href="/api/items">
+                  <AppIcon icon={File02Icon} />
+                  JSON
+                </a>
+              }
+            />
+          </CardAction>
+        </CardHeader>
+
+        <CardContent className="grid gap-3 p-3 pt-0 sm:p-4 sm:pt-0">
+          <div className="flex flex-col gap-2 border bg-muted/30 p-2 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-wrap gap-1.5">
+              {inboxFilters.map((filter) => (
+                <Button
+                  key={filter.key}
+                  size="sm"
+                  type="button"
+                  variant={inboxFilter === filter.key ? "default" : "outline"}
+                  className="h-7"
+                  onClick={() => setInboxFilter(filter.key)}
+                >
+                  <AppIcon icon={filter.icon} />
+                  {filter.label}
+                  <span className="text-muted-foreground">
+                    {numberFormat.format(itemCounts[filter.key])}
+                  </span>
+                </Button>
+              ))}
+            </div>
+            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+              <AppIcon icon={Sorting01Icon} />
+              Sort
+              <select
+                className="h-8 border bg-background px-2 text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                value={sortKey}
+                onChange={(event) => setSortKey(event.target.value as SortKey)}
+              >
+                {Object.entries(sortLabels).map(([key, label]) => (
+                  <option key={key} value={key}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <ScrollArea className="h-[calc(100svh-11.5rem)] min-h-[34rem]">
+            <div className="grid gap-1.5 pr-3">
+              {visibleItems.map((item) => (
+                <article
+                  className="grid grid-cols-[auto_1fr] gap-3 border bg-background/70 p-2.5 lg:grid-cols-[auto_1fr_auto] lg:items-center"
+                  key={item.id}
+                >
+                  <div className="flex size-9 items-center justify-center border bg-muted">
+                    <AppIcon icon={iconForItem(item)} />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <h2 className="truncate text-sm font-semibold">
+                        {item.name}
+                      </h2>
+                      <Badge
+                        variant={item.kind === "paste" ? "default" : "outline"}
+                      >
+                        {labelForItem(item)}
+                      </Badge>
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                      <span>{numberFormat.format(item.size)} bytes</span>
+                      <span>{item.mime_type ?? "text/plain"}</span>
+                      <span>{new Date(item.created_at).toLocaleString()}</span>
+                    </div>
+                  </div>
+                  <div className="col-span-2 flex gap-1.5 lg:col-span-1 lg:justify-end">
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      type="button"
+                      onClick={() => openPreview(item)}
+                    >
+                      <AppIcon icon={Search01Icon} />
+                      Open
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      render={
+                        <a href={`/api/items/${item.id}/download`}>
+                          <AppIcon icon={Download04Icon} />
+                          Save
+                        </a>
+                      }
+                    />
+                  </div>
+                </article>
+              ))}
+
+              {visibleItems.length === 0 ? (
+                <div className="grid min-h-64 place-items-center border bg-muted/40 text-center">
+                  <div>
+                    <AppIcon
+                      icon={InboxIcon}
+                      className="mx-auto mb-3 size-8 text-muted-foreground"
+                    />
+                    <p className="text-sm font-medium">No matching drops</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Change the category filter or add a new drop.
+                    </p>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </ScrollArea>
+        </CardContent>
+      </Card>
       <Dialog
         open={preview.status !== "idle"}
         onOpenChange={(open) => {
@@ -931,13 +1361,17 @@ export function App() {
                   variant="secondary"
                   onClick={copyPreviewText}
                 >
+                  <AppIcon icon={ClipboardCopyIcon} />
                   {copyStatus}
                 </Button>
               ) : null}
               <Button
                 variant="outline"
                 render={
-                  <a href={`/api/items/${preview.item.id}/download`}>Save</a>
+                  <a href={`/api/items/${preview.item.id}/download`}>
+                    <AppIcon icon={Download04Icon} />
+                    Save
+                  </a>
                 }
               />
             </DialogFooter>
@@ -956,7 +1390,10 @@ function PreviewBody({ preview }: { preview: Preview }) {
   if (preview.status === "loading") {
     return (
       <div className="grid min-h-64 place-items-center border bg-muted text-xs text-muted-foreground">
-        Loading preview...
+        <div className="flex items-center gap-2">
+          <AppIcon icon={Loading03Icon} className="animate-spin" />
+          Loading preview...
+        </div>
       </div>
     )
   }
@@ -998,8 +1435,30 @@ function PreviewBody({ preview }: { preview: Preview }) {
   )
 }
 
+function AppIcon({
+  className,
+  icon,
+}: {
+  className?: string
+  icon: IconSvgElement
+}) {
+  return (
+    <HugeiconsIcon
+      aria-hidden="true"
+      className={cn("size-4", className)}
+      icon={icon}
+      size={16}
+      strokeWidth={1.8}
+    />
+  )
+}
+
 function isImagePreview(item: Item) {
   return item.mime_type?.startsWith("image/") ?? false
+}
+
+function isAudioPreview(item: Item) {
+  return item.mime_type?.startsWith("audio/") ?? false
 }
 
 function isTextPreview(item: Item) {
@@ -1011,6 +1470,38 @@ function isTextPreview(item: Item) {
     item.name.endsWith(".txt") ||
     item.name.endsWith(".md")
   )
+}
+
+function iconForItem(item: Item) {
+  if (isImagePreview(item)) {
+    return Image01Icon
+  }
+
+  if (isAudioPreview(item)) {
+    return MusicNote01Icon
+  }
+
+  if (isTextPreview(item)) {
+    return TextIcon
+  }
+
+  return File02Icon
+}
+
+function labelForItem(item: Item) {
+  if (isImagePreview(item)) {
+    return "Image"
+  }
+
+  if (isAudioPreview(item)) {
+    return "Audio"
+  }
+
+  if (item.kind === "paste") {
+    return "Text"
+  }
+
+  return "File"
 }
 
 function throwIfNotOk(response: Response) {
@@ -1028,6 +1519,10 @@ function guessDeviceName() {
   const touch = navigator.maxTouchPoints > 1 ? "phone" : "browser"
 
   return `${platform} ${touch}`
+}
+
+function getPairingCodeFromUrl() {
+  return new URLSearchParams(window.location.search).get("pairingCode") ?? ""
 }
 
 export default App

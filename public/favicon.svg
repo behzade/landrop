@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">LAN Drop favicon</title>
+  <desc id="desc">Two laptops connected by a cable.</desc>
+  <rect width="64" height="64" rx="14" fill="#101820"/>
+  <path d="M20 35c0 5 4 9 9 9h6c5 0 9-4 9-9" fill="none" stroke="#22D3EE" stroke-width="5" stroke-linecap="round"/>
+  <path d="M11 19h20v16H11V19Z" fill="#F8FAFC"/>
+  <path d="M33 19h20v16H33V19Z" fill="#F8FAFC"/>
+  <path d="M8 38h26l-3 6H11l-3-6Z" fill="#CBD5E1"/>
+  <path d="M30 38h26l-3 6H33l-3-6Z" fill="#CBD5E1"/>
+  <rect x="15" y="23" width="12" height="8" rx="1.5" fill="#0EA5A4"/>
+  <rect x="37" y="23" width="12" height="8" rx="1.5" fill="#0EA5A4"/>
+</svg>
