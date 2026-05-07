@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            target: bun-linux-x64
+            outfile: build/landrop-linux-x64
+            asset: landrop-linux-x64.tar.gz
+          - name: linux-arm64
+            target: bun-linux-arm64
+            outfile: build/landrop-linux-arm64
+            asset: landrop-linux-arm64.tar.gz
+          - name: macos-x64
+            target: bun-darwin-x64
+            outfile: build/landrop-darwin-x64
+            asset: landrop-darwin-x64.tar.gz
+          - name: macos-arm64
+            target: bun-darwin-arm64
+            outfile: build/landrop-darwin-arm64
+            asset: landrop-darwin-arm64.tar.gz
+          - name: windows-x64
+            target: bun-windows-x64
+            outfile: build/landrop-windows-x64.exe
+            asset: landrop-windows-x64.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v3
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Build executable
+        run: bun run build:prod -- --target=${{ matrix.target }} --outfile=${{ matrix.outfile }}
+
+      - name: Package Unix executable
+        if: ${{ !endsWith(matrix.outfile, '.exe') }}
+        run: |
+          mkdir -p release/landrop
+          cp "${{ matrix.outfile }}" release/landrop/landrop
+          cp README.md LICENSE release/landrop/
+          tar -czf "${{ matrix.asset }}" -C release landrop
+
+      - name: Package Windows executable
+        if: ${{ endsWith(matrix.outfile, '.exe') }}
+        run: |
+          mkdir -p release/landrop
+          cp "${{ matrix.outfile }}" release/landrop/landrop.exe
+          cp README.md LICENSE release/landrop/
+          cd release
+          zip -r "../${{ matrix.asset }}" landrop
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}

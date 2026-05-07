@@ -1,10 +1,12 @@
 import { FileSystem, HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "@effect/platform";
 import { BunFileSystem, BunHttpServer, BunPath, BunRuntime } from "@effect/platform-bun";
 import { Database, type Statement } from "bun:sqlite";
+import { embeddedFiles } from "bun";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { homedir, networkInterfaces } from "node:os";
 import { basename, join, resolve, sep } from "node:path";
 import { Effect, Layer, Option, PubSub, Schedule, Stream, pipe } from "effect";
+import "./embedded-assets.generated";
 
 type ItemKind = "paste" | "file";
 
@@ -35,6 +37,10 @@ interface TrustedDeviceInsert {
   readonly createdAt: number;
 }
 
+type EmbeddedFile = Blob & {
+  readonly name?: string;
+};
+
 const PORT = Number(process.env.PORT ?? "8787");
 const HOST = process.env.HOST ?? "0.0.0.0";
 const TOKEN_COOKIE = "landrop_token";
@@ -47,6 +53,7 @@ const UPLOADS_DIR = join(ROOT, "uploads");
 const DATA_DIR = join(ROOT, "data");
 const DIST_DIR = resolve(process.cwd(), "dist");
 const DIST_INDEX = join(DIST_DIR, "index.html");
+const EMBEDDED_ASSETS = embeddedAssetMap();
 
 installTerminalCleanup();
 
@@ -341,6 +348,18 @@ const handleEvents = Effect.gen(function* () {
 });
 
 const serveIndex = Effect.gen(function* () {
+  const embeddedIndex = EMBEDDED_ASSETS.get("index.html");
+
+  if (embeddedIndex) {
+    return HttpServerResponse.fromWeb(
+      new Response(embeddedIndex, {
+        headers: {
+          "content-type": embeddedIndex.type || "text/html; charset=utf-8",
+        },
+      }),
+    );
+  }
+
   const fs = yield* FileSystem.FileSystem;
   const hasBuild = yield* fs.exists(DIST_INDEX);
 
@@ -366,6 +385,18 @@ const serveStatic = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
   const webRequest = yield* HttpServerRequest.toWeb(request);
   const pathname = new URL(webRequest.url).pathname;
+  const embeddedAsset = EMBEDDED_ASSETS.get(pathname.replace(/^\/+/, ""));
+
+  if (embeddedAsset) {
+    return HttpServerResponse.fromWeb(
+      new Response(embeddedAsset, {
+        headers: {
+          "content-type": embeddedAsset.type || mimeTypeForPath(pathname),
+        },
+      }),
+    );
+  }
+
   const filePath = resolve(DIST_DIR, `.${pathname}`);
 
   if (!isInsideDist(filePath)) {
@@ -432,6 +463,52 @@ function tryFormatJson(input: string): string | null {
 
 function isInsideDist(path: string) {
   return path === DIST_DIR || path.startsWith(`${DIST_DIR}${sep}`);
+}
+
+function embeddedAssetMap() {
+  const assets = new Map<string, Blob>();
+
+  for (const file of embeddedFiles as readonly EmbeddedFile[]) {
+    if (!file.name) {
+      continue;
+    }
+
+    const name = normalizeAssetName(file.name);
+
+    assets.set(name, file);
+
+    const distIndex = name.indexOf("dist/");
+
+    if (distIndex >= 0) {
+      assets.set(name.slice(distIndex + "dist/".length), file);
+    }
+  }
+
+  return assets;
+}
+
+function normalizeAssetName(name: string) {
+  return name.replaceAll("\\", "/").replace(/^\/+/, "");
+}
+
+function mimeTypeForPath(pathname: string) {
+  if (pathname.endsWith(".css")) {
+    return "text/css; charset=utf-8";
+  }
+
+  if (pathname.endsWith(".js")) {
+    return "text/javascript; charset=utf-8";
+  }
+
+  if (pathname.endsWith(".svg")) {
+    return "image/svg+xml";
+  }
+
+  if (pathname.endsWith(".woff2")) {
+    return "font/woff2";
+  }
+
+  return "application/octet-stream";
 }
 
 function serveItemFile(download: boolean) {

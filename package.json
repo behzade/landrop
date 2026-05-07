@@ -9,6 +9,7 @@
     "start": "bun run build && bun run start:server",
     "start:server": "bun run server/main.ts",
     "build": "tsc -b && vite build",
+    "build:prod": "bun run scripts/build-production.ts",
     "lint": "eslint .",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
