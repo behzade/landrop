@@ -2,6 +2,7 @@ import {
   type ChangeEvent,
   type DragEvent,
   type FormEvent,
+  useRef,
   useEffect,
   useMemo,
   useState,
@@ -16,12 +17,16 @@ import {
   Download04Icon,
   File02Icon,
   FileUploadIcon,
+  Folder01Icon,
+  FolderOpenIcon,
   FolderUploadIcon,
   Image01Icon,
   InboxIcon,
   Key01Icon,
   Loading03Icon,
   MusicNote01Icon,
+  PauseIcon,
+  PlayIcon,
   QrCodeScanIcon,
   Search01Icon,
   SentIcon,
@@ -30,6 +35,7 @@ import {
   TextIcon,
   Upload04Icon,
   UserAccountIcon,
+  VolumeHighIcon,
 } from "@hugeicons/core-free-icons"
 import { toDataURL } from "qrcode"
 import { toast } from "sonner"
@@ -62,12 +68,26 @@ import { cn } from "@/lib/utils"
 
 type Item = {
   id: string
-  kind: "paste" | "file"
+  kind: "paste" | "file" | "folder"
   name: string
   mime_type: string | null
   size: number
   path: string
   created_at: number
+}
+
+type FolderEntry = {
+  name: string
+  path: string
+  kind: "file" | "folder"
+  mime_type: string | null
+  size: number
+  modified_at: number | null
+}
+
+type FolderResponse = {
+  path: string
+  entries: FolderEntry[]
 }
 
 type TrustedDevice = {
@@ -96,7 +116,7 @@ type Preview =
 type PreviewPayload = { url?: string; text?: string }
 type InboxFilter = "all" | "text" | "files" | "images" | "audio"
 type SortKey = "newest" | "oldest" | "name" | "size"
-type UploadTab = "text" | "file" | "clipboard"
+type UploadTab = "text" | "file" | "folder" | "clipboard"
 
 const numberFormat = new Intl.NumberFormat()
 const defaultDeviceName = guessDeviceName()
@@ -146,6 +166,7 @@ export function App() {
   const [copyStatus, setCopyStatus] = useState("Copy")
   const [pasteSubmitting, setPasteSubmitting] = useState(false)
   const [uploadSubmitting, setUploadSubmitting] = useState(false)
+  const [folderSubmitting, setFolderSubmitting] = useState(false)
   const [sendOpen, setSendOpen] = useState(false)
   const [uploadTab, setUploadTab] = useState<UploadTab>("text")
   const [inboxFilter, setInboxFilter] = useState<InboxFilter>("all")
@@ -398,6 +419,20 @@ export function App() {
       return { status: "loading", item }
     })
 
+    if (isFolderItem(item)) {
+      setPreview({ status: "ready", item })
+      return
+    }
+
+    if (isAudioPreview(item)) {
+      setPreview({
+        status: "ready",
+        item,
+        url: `/api/items/${item.id}/open`,
+      })
+      return
+    }
+
     fetch(`/api/items/${item.id}/open`)
       .then<PreviewPayload>((response) => {
         if (!response.ok) {
@@ -547,6 +582,49 @@ export function App() {
       })
       .finally(() => {
         setUploadSubmitting(false)
+      })
+  }
+
+  const submitFolder = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    if (folderSubmitting) {
+      return
+    }
+
+    const form = event.currentTarget
+    const formData = new FormData(form)
+    const path = String(formData.get("path") ?? "").trim()
+
+    if (!path) {
+      toast.warning("Folder path is empty", {
+        description: "Enter a folder path from the LAN Drop server device.",
+      })
+      return
+    }
+
+    setFolderSubmitting(true)
+
+    fetch("/api/folders", {
+      method: "POST",
+      body: formData,
+    })
+      .then(throwIfNotOk)
+      .then(() => {
+        form.reset()
+        setSendOpen(false)
+        toast.success("Folder served", {
+          description: path,
+        })
+      })
+      .catch((error: unknown) => {
+        toast.error("Folder failed", {
+          description:
+            error instanceof Error ? error.message : "Could not serve folder",
+        })
+      })
+      .finally(() => {
+        setFolderSubmitting(false)
       })
   }
 
@@ -890,10 +968,11 @@ export function App() {
               </DialogHeader>
 
               <div className="grid gap-4 overflow-hidden">
-                <div className="grid grid-cols-3 border">
+                <div className="grid grid-cols-4 border">
                   {[
                     { key: "text", label: "Text", icon: TextIcon },
                     { key: "file", label: "File", icon: FolderUploadIcon },
+                    { key: "folder", label: "Folder", icon: FolderOpenIcon },
                     {
                       key: "clipboard",
                       label: "Clipboard",
@@ -989,6 +1068,42 @@ export function App() {
                     >
                       <AppIcon icon={FileUploadIcon} />
                       {uploadSubmitting ? "Uploading..." : "Upload file"}
+                    </Button>
+                  </form>
+                ) : null}
+
+                {uploadTab === "folder" ? (
+                  <form className="grid gap-3" onSubmit={submitFolder}>
+                    <div className="grid min-h-44 place-items-center border border-dashed bg-muted/40 p-6 text-center">
+                      <div className="grid w-full max-w-lg gap-3">
+                        <div className="mx-auto flex size-12 items-center justify-center border bg-background">
+                          <AppIcon
+                            icon={FolderOpenIcon}
+                            className="size-5 text-primary"
+                          />
+                        </div>
+                        <div>
+                          <p className="text-sm font-medium">
+                            Serve a folder in place
+                          </p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            Use a path on the device running LAN Drop.
+                          </p>
+                        </div>
+                        <Input
+                          className="h-10 bg-background font-mono text-xs"
+                          name="path"
+                          placeholder="~/Music"
+                        />
+                      </div>
+                    </div>
+                    <Button
+                      className="h-11 w-full text-sm"
+                      type="submit"
+                      disabled={folderSubmitting}
+                    >
+                      <AppIcon icon={FolderOpenIcon} />
+                      {folderSubmitting ? "Serving..." : "Serve folder"}
                     </Button>
                   </form>
                 ) : null}
@@ -1277,7 +1392,11 @@ export function App() {
                       </Badge>
                     </div>
                     <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                      <span>{numberFormat.format(item.size)} bytes</span>
+                      <span>
+                        {isFolderItem(item)
+                          ? "Served folder"
+                          : `${numberFormat.format(item.size)} bytes`}
+                      </span>
                       <span>{item.mime_type ?? "text/plain"}</span>
                       <span>{new Date(item.created_at).toLocaleString()}</span>
                     </div>
@@ -1292,16 +1411,18 @@ export function App() {
                       <AppIcon icon={Search01Icon} />
                       Open
                     </Button>
-                    <Button
-                      variant="outline"
-                      size="xs"
-                      render={
-                        <a href={`/api/items/${item.id}/download`}>
-                          <AppIcon icon={Download04Icon} />
-                          Save
-                        </a>
-                      }
-                    />
+                    {!isFolderItem(item) ? (
+                      <Button
+                        variant="outline"
+                        size="xs"
+                        render={
+                          <a href={`/api/items/${item.id}/download`}>
+                            <AppIcon icon={Download04Icon} />
+                            Save
+                          </a>
+                        }
+                      />
+                    ) : null}
                   </div>
                 </article>
               ))}
@@ -1346,7 +1467,9 @@ export function App() {
             <DialogDescription>
               {preview.status === "idle"
                 ? null
-                : `${numberFormat.format(preview.item.size)} bytes`}
+                : isFolderItem(preview.item)
+                  ? "Served folder"
+                  : `${numberFormat.format(preview.item.size)} bytes`}
             </DialogDescription>
           </DialogHeader>
 
@@ -1365,15 +1488,17 @@ export function App() {
                   {copyStatus}
                 </Button>
               ) : null}
-              <Button
-                variant="outline"
-                render={
-                  <a href={`/api/items/${preview.item.id}/download`}>
-                    <AppIcon icon={Download04Icon} />
-                    Save
-                  </a>
-                }
-              />
+              {!isFolderItem(preview.item) ? (
+                <Button
+                  variant="outline"
+                  render={
+                    <a href={`/api/items/${preview.item.id}/download`}>
+                      <AppIcon icon={Download04Icon} />
+                      Save
+                    </a>
+                  }
+                />
+              ) : null}
             </DialogFooter>
           ) : null}
         </DialogContent>
@@ -1406,6 +1531,10 @@ function PreviewBody({ preview }: { preview: Preview }) {
     )
   }
 
+  if (isFolderItem(preview.item)) {
+    return <FolderPreview item={preview.item} />
+  }
+
   if (preview.url && isImagePreview(preview.item)) {
     return (
       <div className="max-h-[min(70svh,48rem)] max-w-full overflow-auto border bg-muted p-2">
@@ -1416,6 +1545,10 @@ function PreviewBody({ preview }: { preview: Preview }) {
         />
       </div>
     )
+  }
+
+  if (preview.url && isAudioPreview(preview.item)) {
+    return <AudioPlayer name={preview.item.name} src={preview.url} />
   }
 
   if (typeof preview.text === "string" && isTextPreview(preview.item)) {
@@ -1431,6 +1564,321 @@ function PreviewBody({ preview }: { preview: Preview }) {
   return (
     <div className="border bg-muted p-4 text-xs text-muted-foreground">
       No inline preview for this file type. Use Save to download it.
+    </div>
+  )
+}
+
+function FolderPreview({ item }: { item: Item }) {
+  const [folderPath, setFolderPath] = useState("")
+  const [entries, setEntries] = useState<FolderEntry[]>([])
+  const [status, setStatus] = useState<"loading" | "ready" | "error">(
+    "loading"
+  )
+  const [message, setMessage] = useState("")
+  const [selected, setSelected] = useState<FolderEntry | null>(null)
+  const [textPreview, setTextPreview] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+
+    fetch(folderListUrl(item.id, folderPath))
+      .then(throwIfNotOk)
+      .then((response) => response.json() as Promise<FolderResponse>)
+      .then((payload) => {
+        if (!cancelled) {
+          setEntries(payload.entries)
+          setStatus("ready")
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setStatus("error")
+          setMessage(
+            error instanceof Error ? error.message : "Could not load folder"
+          )
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [folderPath, item.id])
+
+  const changeFolder = (path: string) => {
+    setStatus("loading")
+    setSelected(null)
+    setTextPreview(null)
+    setFolderPath(path)
+  }
+
+  const openEntry = (entry: FolderEntry) => {
+    if (entry.kind === "folder") {
+      changeFolder(entry.path)
+      return
+    }
+
+    setSelected(entry)
+    setTextPreview(null)
+
+    if (isTextLike(entry)) {
+      fetch(folderFileUrl(item.id, entry.path, "open"))
+        .then(throwIfNotOk)
+        .then((response) => response.text())
+        .then(setTextPreview)
+        .catch((error: unknown) => {
+          toast.error("Could not preview file", {
+            description:
+              error instanceof Error ? error.message : "Preview failed",
+          })
+        })
+    }
+  }
+
+  const parentPath = folderPath.split("/").slice(0, -1).join("/")
+
+  if (status === "loading") {
+    return (
+      <div className="grid min-h-64 place-items-center border bg-muted text-xs text-muted-foreground">
+        <div className="flex items-center gap-2">
+          <AppIcon icon={Loading03Icon} className="animate-spin" />
+          Loading folder...
+        </div>
+      </div>
+    )
+  }
+
+  if (status === "error") {
+    return (
+      <div className="border bg-muted p-4 text-xs text-muted-foreground">
+        {message}
+      </div>
+    )
+  }
+
+  return (
+    <div className="grid max-h-[min(70svh,48rem)] grid-rows-[auto_1fr] overflow-hidden border bg-background">
+      <div className="flex min-h-11 flex-wrap items-center justify-between gap-2 border-b bg-muted/60 px-3 py-2">
+        <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+          <AppIcon icon={Folder01Icon} />
+          <span className="truncate font-mono">{folderPath || "/"}</span>
+        </div>
+        {folderPath ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            onClick={() => changeFolder(parentPath)}
+          >
+            Up
+          </Button>
+        ) : null}
+      </div>
+      <div className="grid min-h-0 lg:grid-cols-[minmax(18rem,24rem)_1fr]">
+        <div className="min-h-56 overflow-auto border-r">
+          {entries.map((entry) => (
+            <button
+              className={cn(
+                "grid w-full grid-cols-[auto_1fr_auto] items-center gap-2 border-b px-3 py-2 text-left text-sm hover:bg-muted",
+                selected?.path === entry.path && "bg-muted"
+              )}
+              key={entry.path}
+              type="button"
+              onClick={() => openEntry(entry)}
+            >
+              <AppIcon
+                icon={
+                  entry.kind === "folder" ? Folder01Icon : iconForFile(entry)
+                }
+              />
+              <span className="min-w-0 truncate">{entry.name}</span>
+              <span className="text-xs text-muted-foreground">
+                {entry.kind === "folder"
+                  ? "Folder"
+                  : numberFormat.format(entry.size)}
+              </span>
+            </button>
+          ))}
+          {entries.length === 0 ? (
+            <div className="p-4 text-xs text-muted-foreground">
+              This folder is empty.
+            </div>
+          ) : null}
+        </div>
+        <FolderFilePreview
+          entry={selected}
+          itemId={item.id}
+          textPreview={textPreview}
+        />
+      </div>
+    </div>
+  )
+}
+
+function FolderFilePreview({
+  entry,
+  itemId,
+  textPreview,
+}: {
+  entry: FolderEntry | null
+  itemId: string
+  textPreview: string | null
+}) {
+  if (!entry) {
+    return (
+      <div className="grid min-h-64 place-items-center bg-muted/30 p-4 text-xs text-muted-foreground">
+        Select a file to preview or download.
+      </div>
+    )
+  }
+
+  const openUrl = folderFileUrl(itemId, entry.path, "open")
+  const downloadUrl = folderFileUrl(itemId, entry.path, "download")
+
+  return (
+    <div className="min-h-0 overflow-auto bg-muted/30 p-3">
+      <div className="mb-3 flex min-h-9 flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium">{entry.name}</p>
+          <p className="text-xs text-muted-foreground">
+            {entry.mime_type ?? "application/octet-stream"}
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="xs"
+          render={
+            <a href={downloadUrl}>
+              <AppIcon icon={Download04Icon} />
+              Save
+            </a>
+          }
+        />
+      </div>
+      {isAudioLike(entry) ? (
+        <AudioPlayer name={entry.name} src={openUrl} />
+      ) : isImageLike(entry) ? (
+        <div className="max-h-[52svh] overflow-auto border bg-muted p-2">
+          <img
+            alt={entry.name}
+            className="mx-auto max-h-[48svh] max-w-full object-contain"
+            src={openUrl}
+          />
+        </div>
+      ) : isTextLike(entry) ? (
+        <div className="max-h-[52svh] overflow-auto border bg-muted">
+          <pre className="min-w-max p-4 font-mono text-xs leading-5">
+            {textPreview ?? "Loading preview..."}
+          </pre>
+        </div>
+      ) : (
+        <div className="border bg-muted p-4 text-xs text-muted-foreground">
+          No inline preview for this file type. Use Save to download it.
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AudioPlayer({ name, src }: { name: string; src: string }) {
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const [playing, setPlaying] = useState(false)
+  const [duration, setDuration] = useState(0)
+  const [currentTime, setCurrentTime] = useState(0)
+  const [volume, setVolume] = useState(1)
+
+  const togglePlayback = () => {
+    const audio = audioRef.current
+
+    if (!audio) {
+      return
+    }
+
+    if (audio.paused) {
+      audio.play().catch(() => {
+        toast.error("Audio playback failed")
+      })
+    } else {
+      audio.pause()
+    }
+  }
+
+  const seek = (value: string) => {
+    const nextTime = Number(value)
+    const audio = audioRef.current
+
+    if (audio) {
+      audio.currentTime = nextTime
+    }
+
+    setCurrentTime(nextTime)
+  }
+
+  const changeVolume = (value: string) => {
+    const nextVolume = Number(value)
+    const audio = audioRef.current
+
+    if (audio) {
+      audio.volume = nextVolume
+    }
+
+    setVolume(nextVolume)
+  }
+
+  return (
+    <div className="border bg-muted p-4">
+      <audio
+        ref={audioRef}
+        preload="metadata"
+        src={src}
+        onDurationChange={(event) =>
+          setDuration(event.currentTarget.duration || 0)
+        }
+        onEnded={() => setPlaying(false)}
+        onPause={() => setPlaying(false)}
+        onPlay={() => setPlaying(true)}
+        onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+      />
+      <div className="grid gap-3">
+        <div className="flex items-center gap-3">
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            onClick={togglePlayback}
+          >
+            <AppIcon icon={playing ? PauseIcon : PlayIcon} />
+          </Button>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium">{name}</p>
+            <p className="font-mono text-xs text-muted-foreground">
+              {formatDuration(currentTime)} / {formatDuration(duration)}
+            </p>
+          </div>
+        </div>
+        <input
+          aria-label="Seek"
+          className="h-2 w-full accent-primary"
+          max={duration || 0}
+          min="0"
+          step="0.01"
+          type="range"
+          value={Math.min(currentTime, duration || 0)}
+          onChange={(event) => seek(event.target.value)}
+        />
+        <div className="flex items-center gap-2 text-muted-foreground">
+          <AppIcon icon={VolumeHighIcon} />
+          <input
+            aria-label="Volume"
+            className="h-2 w-28 accent-primary"
+            max="1"
+            min="0"
+            step="0.01"
+            type="range"
+            value={volume}
+            onChange={(event) => changeVolume(event.target.value)}
+          />
+        </div>
+      </div>
     </div>
   )
 }
@@ -1461,6 +1909,10 @@ function isAudioPreview(item: Item) {
   return item.mime_type?.startsWith("audio/") ?? false
 }
 
+function isFolderItem(item: Item) {
+  return item.kind === "folder"
+}
+
 function isTextPreview(item: Item) {
   return (
     item.kind === "paste" ||
@@ -1473,6 +1925,10 @@ function isTextPreview(item: Item) {
 }
 
 function iconForItem(item: Item) {
+  if (isFolderItem(item)) {
+    return Folder01Icon
+  }
+
   if (isImagePreview(item)) {
     return Image01Icon
   }
@@ -1489,6 +1945,10 @@ function iconForItem(item: Item) {
 }
 
 function labelForItem(item: Item) {
+  if (isFolderItem(item)) {
+    return "Folder"
+  }
+
   if (isImagePreview(item)) {
     return "Image"
   }
@@ -1502,6 +1962,64 @@ function labelForItem(item: Item) {
   }
 
   return "File"
+}
+
+function iconForFile(entry: FolderEntry) {
+  if (isImageLike(entry)) {
+    return Image01Icon
+  }
+
+  if (isAudioLike(entry)) {
+    return MusicNote01Icon
+  }
+
+  if (isTextLike(entry)) {
+    return TextIcon
+  }
+
+  return File02Icon
+}
+
+function isImageLike(entry: Pick<FolderEntry, "mime_type">) {
+  return entry.mime_type?.startsWith("image/") ?? false
+}
+
+function isAudioLike(entry: Pick<FolderEntry, "mime_type">) {
+  return entry.mime_type?.startsWith("audio/") ?? false
+}
+
+function isTextLike(entry: Pick<FolderEntry, "mime_type" | "name">) {
+  return (
+    entry.mime_type?.startsWith("text/") ||
+    entry.mime_type === "application/json" ||
+    entry.name.endsWith(".json") ||
+    entry.name.endsWith(".txt") ||
+    entry.name.endsWith(".md")
+  )
+}
+
+function folderListUrl(itemId: string, path: string) {
+  return `/api/items/${itemId}/folder?path=${encodeURIComponent(path)}`
+}
+
+function folderFileUrl(
+  itemId: string,
+  path: string,
+  action: "open" | "download"
+) {
+  return `/api/items/${itemId}/folder/${action}?path=${encodeURIComponent(path)}`
+}
+
+function formatDuration(value: number) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0:00"
+  }
+
+  const totalSeconds = Math.floor(value)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = String(totalSeconds % 60).padStart(2, "0")
+
+  return `${minutes}:${seconds}`
 }
 
 function throwIfNotOk(response: Response) {

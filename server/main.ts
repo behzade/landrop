@@ -20,12 +20,12 @@ import {
   timingSafeEqual,
 } from "node:crypto"
 import { homedir, networkInterfaces } from "node:os"
-import { basename, join, resolve, sep } from "node:path"
+import { basename, extname, join, resolve, sep } from "node:path"
 import { Effect, Layer, Option, PubSub, Schedule, Stream, pipe } from "effect"
 import { toString as qrToString } from "qrcode"
 import "./embedded-assets.generated"
 
-type ItemKind = "paste" | "file"
+type ItemKind = "paste" | "file" | "folder"
 
 interface ItemInsert {
   readonly id: string
@@ -324,6 +324,54 @@ const handleUpload = Effect.gen(function* () {
   return redirectHome
 })
 
+const handleServeFolder = Effect.gen(function* () {
+  const auth = yield* requireTrustedDevice
+
+  if (auth) {
+    return auth
+  }
+
+  const request = yield* HttpServerRequest.HttpServerRequest
+  const webRequest = yield* HttpServerRequest.toWeb(request)
+  const form = yield* Effect.tryPromise(() => webRequest.formData())
+  const rawPath = String(form.get("path") ?? "").trim()
+
+  if (!rawPath) {
+    return HttpServerResponse.text("Folder path is required", { status: 400 })
+  }
+
+  const fs = yield* FileSystem.FileSystem
+  const folderPath = yield* Effect.either(
+    fs.realPath(resolve(expandHomePath(rawPath)))
+  )
+
+  if (folderPath._tag === "Left") {
+    return HttpServerResponse.text("Folder does not exist", { status: 400 })
+  }
+
+  const stat = yield* fs.stat(folderPath.right)
+
+  if (stat.type !== "Directory") {
+    return HttpServerResponse.text("Path is not a folder", { status: 400 })
+  }
+
+  const db = yield* AppDb
+  const id = randomUUID()
+
+  yield* db.insert({
+    id,
+    kind: "folder",
+    name: basename(folderPath.right) || folderPath.right,
+    mimeType: "inode/directory",
+    size: 0,
+    path: folderPath.right,
+    createdAt: Date.now(),
+  })
+  yield* (yield* ItemEvents).publishItemsChanged()
+
+  return redirectHome
+})
+
 const handleItems = Effect.gen(function* () {
   const auth = yield* requireTrustedDevice
 
@@ -339,6 +387,83 @@ const handleItems = Effect.gen(function* () {
 
 const handleOpenItem = serveItemFile(false)
 const handleDownloadItem = serveItemFile(true)
+const handleFolderItems = Effect.gen(function* () {
+  const auth = yield* requireTrustedDevice
+
+  if (auth) {
+    return auth
+  }
+
+  const folder = yield* findFolderItem
+
+  if (!folder.ok) {
+    return folder.response
+  }
+
+  const request = yield* HttpServerRequest.HttpServerRequest
+  const webRequest = yield* HttpServerRequest.toWeb(request)
+  const nestedPath = new URL(webRequest.url).searchParams.get("path") ?? ""
+  const resolved = yield* resolveFolderChild(folder.item.path, nestedPath)
+
+  if (!resolved.ok) {
+    return resolved.response
+  }
+
+  const fs = yield* FileSystem.FileSystem
+  const stat = yield* fs.stat(resolved.path)
+
+  if (stat.type !== "Directory") {
+    return HttpServerResponse.text("Path is not a folder", { status: 400 })
+  }
+
+  const names = yield* fs.readDirectory(resolved.path)
+  const entries: Array<{
+    name: string
+    path: string
+    kind: "file" | "folder"
+    mime_type: string
+    size: number
+    modified_at: number | null
+  }> = []
+
+  for (const name of names) {
+    const relativePath = join(nestedPath, name).replaceAll("\\", "/")
+    const entryPath = yield* resolveFolderChild(folder.item.path, relativePath)
+
+    if (!entryPath.ok) {
+      continue
+    }
+
+    const info = yield* fs.stat(entryPath.path)
+
+    if (info.type !== "Directory" && info.type !== "File") {
+      continue
+    }
+
+    entries.push({
+      name,
+      path: relativePath,
+      kind: info.type === "Directory" ? "folder" : "file",
+      mime_type:
+        info.type === "Directory" ? "inode/directory" : mimeTypeForFile(name),
+      size: info.type === "Directory" ? 0 : Number(info.size),
+      modified_at: Option.getOrUndefined(info.mtime)?.getTime() ?? null,
+    })
+  }
+
+  return yield* HttpServerResponse.json({
+    path: nestedPath,
+    entries: entries.sort((left, right) => {
+      if (left.kind !== right.kind) {
+        return left.kind === "folder" ? -1 : 1
+      }
+
+      return left.name.localeCompare(right.name)
+    }),
+  })
+})
+const handleOpenFolderFile = serveFolderFile(false)
+const handleDownloadFolderFile = serveFolderFile(true)
 
 const handleAuthStatus = Effect.gen(function* () {
   const trusted = yield* isTrustedRequest
@@ -592,10 +717,11 @@ const serveStatic = Effect.gen(function* () {
   return yield* pipe(HttpServerResponse.file(publicFilePath), Effect.flatten)
 })
 
-const app = pipe(
+const apiApp = pipe(
   HttpRouter.empty,
   HttpRouter.post("/api/paste", handlePaste),
   HttpRouter.post("/api/upload", handleUpload),
+  HttpRouter.post("/api/folders", handleServeFolder),
   HttpRouter.get("/api/auth/status", handleAuthStatus),
   HttpRouter.post("/api/pair", handlePair),
   HttpRouter.get("/api/pairing-code", handlePairingCodeStatus),
@@ -605,8 +731,15 @@ const app = pipe(
   HttpRouter.get("/api/items", handleItems),
   HttpRouter.get("/api/items/:id/open", handleOpenItem),
   HttpRouter.get("/api/items/:id/download", handleDownloadItem),
+  HttpRouter.get("/api/items/:id/folder", handleFolderItems),
+  HttpRouter.get("/api/items/:id/folder/open", handleOpenFolderFile),
+  HttpRouter.get("/api/items/:id/folder/download", handleDownloadFolderFile),
   HttpRouter.get("/api/connect", handleConnect),
-  HttpRouter.get("/api/events", handleEvents),
+  HttpRouter.get("/api/events", handleEvents)
+)
+
+const app = pipe(
+  apiApp,
   HttpRouter.get("/", serveIndex),
   HttpRouter.get("/assets/*", serveStatic),
   HttpRouter.get("/favicon.svg", serveStatic),
@@ -642,6 +775,18 @@ const program = pipe(
 
 function sanitizeFilename(name: string) {
   return name.replaceAll("/", "_").replaceAll("\\", "_")
+}
+
+function expandHomePath(path: string) {
+  if (path === "~") {
+    return homedir()
+  }
+
+  if (path.startsWith(`~${sep}`) || path.startsWith("~/")) {
+    return join(homedir(), path.slice(2))
+  }
+
+  return path
 }
 
 function tryFormatJson(input: string): string | null {
@@ -698,6 +843,104 @@ function mimeTypeForPath(pathname: string) {
   return "application/octet-stream"
 }
 
+function mimeTypeForFile(pathname: string) {
+  const extension = extname(pathname).toLowerCase()
+
+  if (extension === ".aac") return "audio/aac"
+  if (extension === ".flac") return "audio/flac"
+  if (extension === ".m4a") return "audio/mp4"
+  if (extension === ".mp3") return "audio/mpeg"
+  if (extension === ".oga" || extension === ".ogg") return "audio/ogg"
+  if (extension === ".opus") return "audio/ogg"
+  if (extension === ".wav") return "audio/wav"
+  if (extension === ".webm") return "audio/webm"
+  if (extension === ".avif") return "image/avif"
+  if (extension === ".gif") return "image/gif"
+  if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg"
+  if (extension === ".png") return "image/png"
+  if (extension === ".svg") return "image/svg+xml"
+  if (extension === ".webp") return "image/webp"
+  if (extension === ".json") return "application/json"
+  if (extension === ".md") return "text/markdown; charset=utf-8"
+  if (extension === ".txt") return "text/plain; charset=utf-8"
+
+  return "application/octet-stream"
+}
+
+const findFolderItem = Effect.gen(function* () {
+  const params = yield* HttpRouter.params
+  const id = params.id
+
+  if (!id) {
+    return {
+      ok: false as const,
+      response: HttpServerResponse.text("Missing item id", { status: 400 }),
+    }
+  }
+
+  const db = yield* AppDb
+  const item = yield* db.findById(id)
+
+  if (!item) {
+    return {
+      ok: false as const,
+      response: HttpServerResponse.text("Item not found", { status: 404 }),
+    }
+  }
+
+  if (item.kind !== "folder") {
+    return {
+      ok: false as const,
+      response: HttpServerResponse.text("Item is not a folder", {
+        status: 400,
+      }),
+    }
+  }
+
+  return { ok: true as const, item }
+})
+
+function resolveFolderChild(rootPath: string, childPath: string) {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem
+    const root = yield* fs.realPath(rootPath)
+    const resolved = resolve(root, childPath || ".")
+
+    if (!isInside(resolved, root)) {
+      return {
+        ok: false as const,
+        response: HttpServerResponse.text("Path is outside served folder", {
+          status: 403,
+        }),
+      }
+    }
+
+    const exists = yield* fs.exists(resolved)
+
+    if (!exists) {
+      return {
+        ok: false as const,
+        response: HttpServerResponse.text("Folder path not found", {
+          status: 404,
+        }),
+      }
+    }
+
+    const realPath = yield* fs.realPath(resolved)
+
+    if (!isInside(realPath, root)) {
+      return {
+        ok: false as const,
+        response: HttpServerResponse.text("Path is outside served folder", {
+          status: 403,
+        }),
+      }
+    }
+
+    return { ok: true as const, path: realPath }
+  })
+}
+
 function serveItemFile(download: boolean) {
   return Effect.gen(function* () {
     const auth = yield* requireTrustedDevice
@@ -718,6 +961,12 @@ function serveItemFile(download: boolean) {
 
     if (!item) {
       return HttpServerResponse.text("Item not found", { status: 404 })
+    }
+
+    if (item.kind === "folder") {
+      return HttpServerResponse.text("Use the folder browser to open files", {
+        status: 400,
+      })
     }
 
     const path = resolve(item.path)
@@ -742,6 +991,55 @@ function serveItemFile(download: boolean) {
         headers: download
           ? {
               "content-disposition": `attachment; filename="${escapeHeaderFilename(item.name || basename(path))}"`,
+            }
+          : undefined,
+      }),
+      Effect.flatten
+    )
+  })
+}
+
+function serveFolderFile(download: boolean) {
+  return Effect.gen(function* () {
+    const auth = yield* requireTrustedDevice
+
+    if (auth) {
+      return auth
+    }
+
+    const folder = yield* findFolderItem
+
+    if (!folder.ok) {
+      return folder.response
+    }
+
+    const request = yield* HttpServerRequest.HttpServerRequest
+    const webRequest = yield* HttpServerRequest.toWeb(request)
+    const nestedPath = new URL(webRequest.url).searchParams.get("path") ?? ""
+
+    if (!nestedPath) {
+      return HttpServerResponse.text("Missing file path", { status: 400 })
+    }
+
+    const path = yield* resolveFolderChild(folder.item.path, nestedPath)
+
+    if (!path.ok) {
+      return path.response
+    }
+
+    const fs = yield* FileSystem.FileSystem
+    const stat = yield* fs.stat(path.path)
+
+    if (stat.type !== "File") {
+      return HttpServerResponse.text("Path is not a file", { status: 400 })
+    }
+
+    return yield* pipe(
+      HttpServerResponse.file(path.path, {
+        contentType: mimeTypeForFile(path.path),
+        headers: download
+          ? {
+              "content-disposition": `attachment; filename="${escapeHeaderFilename(basename(path.path))}"`,
             }
           : undefined,
       }),
