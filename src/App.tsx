@@ -20,6 +20,8 @@ import {
   Folder01Icon,
   FolderOpenIcon,
   FolderUploadIcon,
+  GoBackward10SecIcon,
+  GoForward10SecIcon,
   Image01Icon,
   InboxIcon,
   Key01Icon,
@@ -39,6 +41,7 @@ import {
 } from "@hugeicons/core-free-icons"
 import { toDataURL } from "qrcode"
 import { toast } from "sonner"
+import WaveSurfer from "wavesurfer.js"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -1006,7 +1009,7 @@ export function App() {
                     <Textarea
                       id="drop-text"
                       name="text"
-                      className="min-h-64 resize-y bg-background/80 p-4 font-mono text-sm leading-6  overflow-hidden max-h-80"
+                      className="max-h-80 min-h-64 resize-y overflow-hidden bg-background/80 p-4 font-mono text-sm leading-6"
                       placeholder='{"from": "phone", "to": "desktop"}'
                     />
                     <Button
@@ -1571,9 +1574,7 @@ function PreviewBody({ preview }: { preview: Preview }) {
 function FolderPreview({ item }: { item: Item }) {
   const [folderPath, setFolderPath] = useState("")
   const [entries, setEntries] = useState<FolderEntry[]>([])
-  const [status, setStatus] = useState<"loading" | "ready" | "error">(
-    "loading"
-  )
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading")
   const [message, setMessage] = useState("")
   const [selected, setSelected] = useState<FolderEntry | null>(null)
   const [textPreview, setTextPreview] = useState<string | null>(null)
@@ -1780,45 +1781,103 @@ function FolderFilePreview({
 }
 
 function AudioPlayer({ name, src }: { name: string; src: string }) {
-  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const waveformRef = useRef<HTMLDivElement | null>(null)
+  const wavesurferRef = useRef<WaveSurfer | null>(null)
+  const volumeRef = useRef(1)
   const [playing, setPlaying] = useState(false)
+  const [ready, setReady] = useState(false)
+  const [loadingProgress, setLoadingProgress] = useState(0)
   const [duration, setDuration] = useState(0)
   const [currentTime, setCurrentTime] = useState(0)
   const [volume, setVolume] = useState(1)
 
-  const togglePlayback = () => {
-    const audio = audioRef.current
+  useEffect(() => {
+    const container = waveformRef.current
 
-    if (!audio) {
+    if (!container) {
       return
     }
 
-    if (audio.paused) {
-      audio.play().catch(() => {
-        toast.error("Audio playback failed")
-      })
-    } else {
-      audio.pause()
+    const style = getComputedStyle(document.documentElement)
+    const waveColor = style.getPropertyValue("--muted-foreground").trim()
+    const progressColor = style.getPropertyValue("--primary").trim()
+    const cursorColor = style.getPropertyValue("--foreground").trim()
+    const wavesurfer = WaveSurfer.create({
+      barGap: 2,
+      barRadius: 2,
+      barWidth: 2,
+      cursorColor,
+      cursorWidth: 2,
+      dragToSeek: true,
+      height: 56,
+      normalize: true,
+      progressColor,
+      url: src,
+      waveColor,
+      container,
+    })
+
+    wavesurferRef.current = wavesurfer
+    setCurrentTime(0)
+    setDuration(0)
+    setLoadingProgress(0)
+    setPlaying(false)
+    setReady(false)
+    wavesurfer.setVolume(volumeRef.current)
+
+    wavesurfer.on("loading", (progress) => setLoadingProgress(progress))
+    wavesurfer.on("ready", (nextDuration) => {
+      setDuration(nextDuration)
+      setReady(true)
+      setLoadingProgress(100)
+    })
+    wavesurfer.on("timeupdate", (nextTime) => setCurrentTime(nextTime))
+    wavesurfer.on("seeking", (nextTime) => setCurrentTime(nextTime))
+    wavesurfer.on("play", () => setPlaying(true))
+    wavesurfer.on("pause", () => setPlaying(false))
+    wavesurfer.on("finish", () => setPlaying(false))
+    wavesurfer.on("error", () => {
+      setPlaying(false)
+      setReady(false)
+      toast.error("Audio playback failed")
+    })
+
+    return () => {
+      wavesurfer.destroy()
+      if (wavesurferRef.current === wavesurfer) {
+        wavesurferRef.current = null
+      }
     }
+  }, [src])
+
+  const togglePlayback = () => {
+    const wavesurfer = wavesurferRef.current
+
+    if (!wavesurfer) {
+      return
+    }
+
+    wavesurfer.playPause().catch(() => {
+      toast.error("Audio playback failed")
+    })
   }
 
-  const seek = (value: string) => {
-    const nextTime = Number(value)
-    const audio = audioRef.current
+  const skip = (seconds: number) => {
+    const wavesurfer = wavesurferRef.current
 
-    if (audio) {
-      audio.currentTime = nextTime
+    if (wavesurfer) {
+      wavesurfer.skip(seconds)
     }
-
-    setCurrentTime(nextTime)
   }
 
   const changeVolume = (value: string) => {
     const nextVolume = Number(value)
-    const audio = audioRef.current
+    const wavesurfer = wavesurferRef.current
 
-    if (audio) {
-      audio.volume = nextVolume
+    volumeRef.current = nextVolume
+
+    if (wavesurfer) {
+      wavesurfer.setVolume(nextVolume)
     }
 
     setVolume(nextVolume)
@@ -1826,44 +1885,51 @@ function AudioPlayer({ name, src }: { name: string; src: string }) {
 
   return (
     <div className="border bg-muted p-4">
-      <audio
-        ref={audioRef}
-        preload="metadata"
-        src={src}
-        onDurationChange={(event) =>
-          setDuration(event.currentTarget.duration || 0)
-        }
-        onEnded={() => setPlaying(false)}
-        onPause={() => setPlaying(false)}
-        onPlay={() => setPlaying(true)}
-        onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
-      />
       <div className="grid gap-3">
         <div className="flex items-center gap-3">
           <Button
+            aria-label="Skip backward 10 seconds"
             type="button"
             variant="outline"
             size="icon"
+            disabled={!ready}
+            onClick={() => skip(-10)}
+          >
+            <AppIcon icon={GoBackward10SecIcon} />
+          </Button>
+          <Button
+            aria-label={playing ? "Pause" : "Play"}
+            type="button"
+            variant="outline"
+            size="icon"
+            disabled={!ready}
             onClick={togglePlayback}
           >
             <AppIcon icon={playing ? PauseIcon : PlayIcon} />
           </Button>
+          <Button
+            aria-label="Skip forward 10 seconds"
+            type="button"
+            variant="outline"
+            size="icon"
+            disabled={!ready}
+            onClick={() => skip(10)}
+          >
+            <AppIcon icon={GoForward10SecIcon} />
+          </Button>
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-medium">{name}</p>
             <p className="font-mono text-xs text-muted-foreground">
-              {formatDuration(currentTime)} / {formatDuration(duration)}
+              {ready
+                ? `${formatDuration(currentTime)} / ${formatDuration(duration)}`
+                : `Loading waveform ${Math.round(loadingProgress)}%`}
             </p>
           </div>
         </div>
-        <input
-          aria-label="Seek"
-          className="h-2 w-full accent-primary"
-          max={duration || 0}
-          min="0"
-          step="0.01"
-          type="range"
-          value={Math.min(currentTime, duration || 0)}
-          onChange={(event) => seek(event.target.value)}
+        <div
+          ref={waveformRef}
+          aria-label="Audio waveform"
+          className="min-h-14 cursor-pointer overflow-hidden border bg-background px-2 py-1"
         />
         <div className="flex items-center gap-2 text-muted-foreground">
           <AppIcon icon={VolumeHighIcon} />
