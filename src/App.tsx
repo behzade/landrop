@@ -14,6 +14,7 @@ import {
   ClipboardIcon,
   ClipboardCopyIcon,
   ComputerPhoneSyncIcon,
+  Delete02Icon,
   Download04Icon,
   File02Icon,
   FileUploadIcon,
@@ -165,6 +166,7 @@ export function App() {
   const [deviceName, setDeviceName] = useState(defaultDeviceName)
   const [deviceSaving, setDeviceSaving] = useState(false)
   const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null)
+  const [removingItemId, setRemovingItemId] = useState<string | null>(null)
   const [preview, setPreview] = useState<Preview>({ status: "idle" })
   const [copyStatus, setCopyStatus] = useState("Copy")
   const [pasteSubmitting, setPasteSubmitting] = useState(false)
@@ -250,7 +252,7 @@ export function App() {
     let cancelled = false
 
     const loadItems = () => {
-      fetch("/api/items")
+      fetch("/api/items", { cache: "no-store" })
         .then((response) => {
           if (!response.ok) {
             throw new Error(`Request failed with ${response.status}`)
@@ -436,7 +438,7 @@ export function App() {
       return
     }
 
-    fetch(`/api/items/${item.id}/open`)
+    fetch(`/api/items/${item.id}/open`, { cache: "no-store" })
       .then<PreviewPayload>((response) => {
         if (!response.ok) {
           throw new Error(`Request failed with ${response.status}`)
@@ -469,6 +471,47 @@ export function App() {
         toast.error("Could not open item", {
           description: message,
         })
+      })
+  }
+
+  const removeItem = (item: Item) => {
+    if (removingItemId) {
+      return
+    }
+
+    setRemovingItemId(item.id)
+
+    fetch(`/api/items/${item.id}`, {
+      method: "DELETE",
+    })
+      .then(throwIfNotOk)
+      .then(() => {
+        setItems((current) =>
+          current.filter((currentItem) => currentItem.id !== item.id)
+        )
+        setPreview((current) => {
+          if (current.status !== "idle" && current.item.id === item.id) {
+            if (current.status === "ready" && current.url) {
+              URL.revokeObjectURL(current.url)
+            }
+
+            return { status: "idle" }
+          }
+
+          return current
+        })
+        toast.success("Item unshared", {
+          description: item.name,
+        })
+      })
+      .catch((error: unknown) => {
+        toast.error("Could not unshare item", {
+          description:
+            error instanceof Error ? error.message : "Remove request failed",
+        })
+      })
+      .finally(() => {
+        setRemovingItemId(null)
       })
   }
 
@@ -1426,6 +1469,25 @@ export function App() {
                         }
                       />
                     ) : null}
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      type="button"
+                      disabled={removingItemId === item.id}
+                      onClick={() => removeItem(item)}
+                    >
+                      <AppIcon
+                        icon={
+                          removingItemId === item.id
+                            ? Loading03Icon
+                            : Delete02Icon
+                        }
+                        className={
+                          removingItemId === item.id ? "animate-spin" : ""
+                        }
+                      />
+                      Unshare
+                    </Button>
                   </div>
                 </article>
               ))}
@@ -1582,7 +1644,9 @@ function FolderPreview({ item }: { item: Item }) {
   useEffect(() => {
     let cancelled = false
 
-    fetch(folderListUrl(item.id, folderPath))
+    fetch(folderListUrl(item.id, item.created_at, folderPath), {
+      cache: "no-store",
+    })
       .then(throwIfNotOk)
       .then((response) => response.json() as Promise<FolderResponse>)
       .then((payload) => {
@@ -1603,7 +1667,7 @@ function FolderPreview({ item }: { item: Item }) {
     return () => {
       cancelled = true
     }
-  }, [folderPath, item.id])
+  }, [folderPath, item.created_at, item.id])
 
   const changeFolder = (path: string) => {
     setStatus("loading")
@@ -1622,7 +1686,9 @@ function FolderPreview({ item }: { item: Item }) {
     setTextPreview(null)
 
     if (isTextLike(entry)) {
-      fetch(folderFileUrl(item.id, entry.path, "open"))
+      fetch(folderFileUrl(item.id, item.created_at, entry.path, "open"), {
+        cache: "no-store",
+      })
         .then(throwIfNotOk)
         .then((response) => response.text())
         .then(setTextPreview)
@@ -1707,7 +1773,7 @@ function FolderPreview({ item }: { item: Item }) {
         </div>
         <FolderFilePreview
           entry={selected}
-          itemId={item.id}
+          item={item}
           textPreview={textPreview}
         />
       </div>
@@ -1717,11 +1783,11 @@ function FolderPreview({ item }: { item: Item }) {
 
 function FolderFilePreview({
   entry,
-  itemId,
+  item,
   textPreview,
 }: {
   entry: FolderEntry | null
-  itemId: string
+  item: Item
   textPreview: string | null
 }) {
   if (!entry) {
@@ -1732,8 +1798,13 @@ function FolderFilePreview({
     )
   }
 
-  const openUrl = folderFileUrl(itemId, entry.path, "open")
-  const downloadUrl = folderFileUrl(itemId, entry.path, "download")
+  const openUrl = folderFileUrl(item.id, item.created_at, entry.path, "open")
+  const downloadUrl = folderFileUrl(
+    item.id,
+    item.created_at,
+    entry.path,
+    "download"
+  )
 
   return (
     <div className="min-h-0 overflow-auto bg-muted/30 p-3">
@@ -2064,16 +2135,27 @@ function isTextLike(entry: Pick<FolderEntry, "mime_type" | "name">) {
   )
 }
 
-function folderListUrl(itemId: string, path: string) {
-  return `/api/items/${itemId}/folder?path=${encodeURIComponent(path)}`
+function folderListUrl(itemId: string, itemCreatedAt: number, path: string) {
+  const params = new URLSearchParams({
+    path,
+    revision: String(itemCreatedAt),
+  })
+
+  return `/api/items/${itemId}/folder?${params.toString()}`
 }
 
 function folderFileUrl(
   itemId: string,
+  itemCreatedAt: number,
   path: string,
   action: "open" | "download"
 ) {
-  return `/api/items/${itemId}/folder/${action}?path=${encodeURIComponent(path)}`
+  const params = new URLSearchParams({
+    path,
+    revision: String(itemCreatedAt),
+  })
+
+  return `/api/items/${itemId}/folder/${action}?${params.toString()}`
 }
 
 function formatDuration(value: number) {

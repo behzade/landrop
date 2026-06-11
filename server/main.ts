@@ -79,6 +79,9 @@ const DIST_DIR = resolve(process.cwd(), "dist")
 const DIST_INDEX = join(DIST_DIR, "index.html")
 const PUBLIC_DIR = resolve(process.cwd(), "public")
 const EMBEDDED_ASSETS = embeddedAssetMap()
+const NO_STORE_HEADERS = {
+  "cache-control": "no-store",
+}
 
 installTerminalCleanup()
 
@@ -139,6 +142,10 @@ class AppDb extends Effect.Service<AppDb>()("AppDb", {
       WHERE id = $id
       LIMIT 1
     `)
+    const deleteItem = db.prepare(`
+      DELETE FROM items
+      WHERE id = $id
+    `)
     const selectTrustedToken = db.prepare(`
       SELECT id, name, created_at, revoked_at
       FROM trusted_devices
@@ -169,6 +176,8 @@ class AppDb extends Effect.Service<AppDb>()("AppDb", {
       recent: Effect.sync(() => selectRecent.all() as ItemRow[]),
       findById: (id: string) =>
         Effect.sync(() => selectById.get({ $id: id }) as ItemRow | null),
+      deleteItem: (id: string) =>
+        Effect.sync(() => deleteItem.run({ $id: id })),
       trustedDevices: Effect.sync(
         () => selectTrustedDevices.all() as TrustedDeviceRow[]
       ),
@@ -341,9 +350,8 @@ const handleServeFolder = Effect.gen(function* () {
   }
 
   const fs = yield* FileSystem.FileSystem
-  const folderPath = yield* Effect.either(
-    fs.realPath(resolve(expandHomePath(rawPath)))
-  )
+  const servedPath = resolve(expandHomePath(rawPath))
+  const folderPath = yield* Effect.either(fs.realPath(servedPath))
 
   if (folderPath._tag === "Left") {
     return HttpServerResponse.text("Folder does not exist", { status: 400 })
@@ -361,10 +369,10 @@ const handleServeFolder = Effect.gen(function* () {
   yield* db.insert({
     id,
     kind: "folder",
-    name: basename(folderPath.right) || folderPath.right,
+    name: basename(servedPath) || servedPath,
     mimeType: "inode/directory",
     size: 0,
-    path: folderPath.right,
+    path: servedPath,
     createdAt: Date.now(),
   })
   yield* (yield* ItemEvents).publishItemsChanged()
@@ -382,11 +390,44 @@ const handleItems = Effect.gen(function* () {
   const db = yield* AppDb
   const rows = yield* db.recent
 
-  return yield* HttpServerResponse.json(rows)
+  return yield* HttpServerResponse.json(rows, {
+    headers: NO_STORE_HEADERS,
+  })
 })
 
 const handleOpenItem = serveItemFile(false)
 const handleDownloadItem = serveItemFile(true)
+const handleDeleteItem = Effect.gen(function* () {
+  const auth = yield* requireTrustedDevice
+
+  if (auth) {
+    return auth
+  }
+
+  const params = yield* HttpRouter.params
+  const id = params.id
+
+  if (!id) {
+    return HttpServerResponse.text("Missing item id", { status: 400 })
+  }
+
+  const db = yield* AppDb
+  const item = yield* db.findById(id)
+
+  if (!item) {
+    return HttpServerResponse.text("Item not found", { status: 404 })
+  }
+
+  yield* db.deleteItem(id)
+  yield* (yield* ItemEvents).publishItemsChanged()
+
+  return yield* HttpServerResponse.json(
+    { removed: true },
+    {
+      headers: NO_STORE_HEADERS,
+    }
+  )
+})
 const handleFolderItems = Effect.gen(function* () {
   const auth = yield* requireTrustedDevice
 
@@ -451,16 +492,21 @@ const handleFolderItems = Effect.gen(function* () {
     })
   }
 
-  return yield* HttpServerResponse.json({
-    path: nestedPath,
-    entries: entries.sort((left, right) => {
-      if (left.kind !== right.kind) {
-        return left.kind === "folder" ? -1 : 1
-      }
+  return yield* HttpServerResponse.json(
+    {
+      path: nestedPath,
+      entries: entries.sort((left, right) => {
+        if (left.kind !== right.kind) {
+          return left.kind === "folder" ? -1 : 1
+        }
 
-      return left.name.localeCompare(right.name)
-    }),
-  })
+        return left.name.localeCompare(right.name)
+      }),
+    },
+    {
+      headers: NO_STORE_HEADERS,
+    }
+  )
 })
 const handleOpenFolderFile = serveFolderFile(false)
 const handleDownloadFolderFile = serveFolderFile(true)
@@ -729,6 +775,7 @@ const apiApp = pipe(
   HttpRouter.patch("/api/devices/current", handleRenameCurrentDevice),
   HttpRouter.del("/api/devices/:id", handleRevokeDevice),
   HttpRouter.get("/api/items", handleItems),
+  HttpRouter.del("/api/items/:id", handleDeleteItem),
   HttpRouter.get("/api/items/:id/open", handleOpenItem),
   HttpRouter.get("/api/items/:id/download", handleDownloadItem),
   HttpRouter.get("/api/items/:id/folder", handleFolderItems),
@@ -988,11 +1035,14 @@ function serveItemFile(download: boolean) {
     return yield* pipe(
       HttpServerResponse.file(path, {
         contentType: item.mime_type ?? "application/octet-stream",
-        headers: download
-          ? {
-              "content-disposition": `attachment; filename="${escapeHeaderFilename(item.name || basename(path))}"`,
-            }
-          : undefined,
+        headers: {
+          ...NO_STORE_HEADERS,
+          ...(download
+            ? {
+                "content-disposition": `attachment; filename="${escapeHeaderFilename(item.name || basename(path))}"`,
+              }
+            : {}),
+        },
       }),
       Effect.flatten
     )
@@ -1037,11 +1087,14 @@ function serveFolderFile(download: boolean) {
     return yield* pipe(
       HttpServerResponse.file(path.path, {
         contentType: mimeTypeForFile(path.path),
-        headers: download
-          ? {
-              "content-disposition": `attachment; filename="${escapeHeaderFilename(basename(path.path))}"`,
-            }
-          : undefined,
+        headers: {
+          ...NO_STORE_HEADERS,
+          ...(download
+            ? {
+                "content-disposition": `attachment; filename="${escapeHeaderFilename(basename(path.path))}"`,
+              }
+            : {}),
+        },
       }),
       Effect.flatten
     )
