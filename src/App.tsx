@@ -109,6 +109,7 @@ type PlayerState = {
   contextId: string
   queue: AudioSource[]
   currentIndex: number
+  playRequestId?: number
 }
 
 type ActiveView =
@@ -174,11 +175,13 @@ const appChrome = {
 
 const playerChrome = {
   bar: "shrink-0 overflow-hidden border-t bg-background/95 shadow-lg backdrop-blur",
-  body: "w-full max-w-full min-w-0 overflow-hidden border bg-muted p-3",
-  control: "h-[var(--landrop-player-control)] w-full min-w-0",
-  controls: "grid w-full min-w-0 grid-cols-5 gap-1.5 sm:gap-2",
+  body: "w-full max-w-full min-w-0 overflow-hidden border border-primary/25 bg-card p-3 shadow-sm",
+  control: "h-11 w-full min-w-0",
+  controls:
+    "grid w-full min-w-0 grid-cols-[1fr_1fr_1.2fr_1fr_1fr] gap-1.5 sm:gap-2",
   inner:
     "relative w-full max-w-full min-w-0 px-[var(--landrop-shell-pad)] py-2 sm:px-[var(--landrop-shell-pad-wide)]",
+  playControl: "h-11 w-full min-w-0 border-primary",
 }
 
 export function App() {
@@ -1450,9 +1453,17 @@ export function App() {
           <StickyPlayer
             player={player}
             onClose={() => setPlayer(null)}
-            onSelectIndex={(currentIndex) =>
+            onSelectIndex={(currentIndex, play) =>
               setPlayer((current) =>
-                current ? { ...current, currentIndex } : current
+                current
+                  ? {
+                      ...current,
+                      currentIndex,
+                      ...(play
+                        ? { playRequestId: (current.playRequestId ?? 0) + 1 }
+                        : {}),
+                    }
+                  : current
               )
             }
           />
@@ -1630,6 +1641,10 @@ function FolderView({
 }) {
   const [entries, setEntries] = useState<FolderEntry[]>([])
   const [audioEntries, setAudioEntries] = useState<FolderEntry[]>([])
+  const [cachedAudioUrls, setCachedAudioUrls] = useState<Set<string>>(
+    () => new Set()
+  )
+  const playRequestIdRef = useRef(0)
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading")
   const [message, setMessage] = useState("")
 
@@ -1713,7 +1728,48 @@ function FolderView({
     })
   }, [audioSources, item.id, onSetPlayer, player?.contextId])
 
-  const openEntry = (entry: FolderEntry) => {
+  useEffect(() => {
+    if (!("caches" in window) || audioSources.length === 0) {
+      return
+    }
+
+    let cancelled = false
+
+    caches
+      .open("landrop-media-v1")
+      .then((cache) =>
+        Promise.all(
+          audioSources.map((source) =>
+            cache.match(source.src).then((response) => ({
+              src: source.src,
+              cached: Boolean(response),
+            }))
+          )
+        )
+      )
+      .then((results) => {
+        if (!cancelled) {
+          setCachedAudioUrls(
+            new Set(
+              results
+                .filter((result) => result.cached)
+                .map((result) => result.src)
+            )
+          )
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCachedAudioUrls(new Set())
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [audioSources])
+
+  const selectEntry = (entry: FolderEntry, play = false) => {
     if (entry.kind === "folder") {
       onPathChange(entry.path)
       return
@@ -1727,6 +1783,7 @@ function FolderView({
           0,
           audioSources.findIndex((source) => source.id === entry.path)
         ),
+        ...(play ? { playRequestId: ++playRequestIdRef.current } : {}),
       })
       return
     }
@@ -1750,6 +1807,7 @@ function FolderView({
           .then((response) => cache.put(url, response))
       )
       .then(() => {
+        setCachedAudioUrls((current) => new Set(current).add(url))
         toast.success("Saved offline", {
           description: entry.name,
         })
@@ -1807,37 +1865,55 @@ function FolderView({
       </div>
 
       <div className="grid min-w-0 gap-2">
-        {entries.map((entry) => (
-          <article
-            className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border bg-card/80 text-sm hover:bg-muted"
-            key={entry.path}
-          >
-            <button
-              className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 px-3 py-3 text-left"
-              type="button"
-              onClick={() => openEntry(entry)}
+        {entries.map((entry) => {
+          const audioUrl = folderFileUrl(
+            item.id,
+            item.created_at,
+            entry.path,
+            "open"
+          )
+          const active =
+            player?.contextId === item.id &&
+            player.queue[player.currentIndex]?.id === entry.path
+          const cached = cachedAudioUrls.has(audioUrl)
+
+          return (
+            <article
+              className={cn(
+                "grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border bg-card/80 text-sm hover:bg-muted",
+                active && "border-primary bg-primary/10 shadow-sm"
+              )}
+              key={entry.path}
             >
-              <AppIcon
-                icon={
-                  entry.kind === "folder" ? Folder01Icon : iconForFile(entry)
-                }
-              />
-              <span className="min-w-0 truncate">{entry.name}</span>
-            </button>
-            {isAudioLike(entry) ? (
-              <Button
-                aria-label={`Save ${entry.name} offline`}
-                title="Save offline"
+              <button
+                className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 px-3 py-3 text-left"
                 type="button"
-                variant="ghost"
-                size="icon-sm"
-                onClick={() => cacheEntry(entry)}
+                onClick={() => selectEntry(entry)}
+                onDoubleClick={() => selectEntry(entry, true)}
               >
-                <AppIcon icon={HardDriveDownloadIcon} />
-              </Button>
-            ) : null}
-          </article>
-        ))}
+                <AppIcon
+                  className={active ? "text-primary" : ""}
+                  icon={
+                    entry.kind === "folder" ? Folder01Icon : iconForFile(entry)
+                  }
+                />
+                <span className="min-w-0 truncate">{entry.name}</span>
+              </button>
+              {isAudioLike(entry) && !cached ? (
+                <Button
+                  aria-label={`Save ${entry.name} offline`}
+                  title="Save offline"
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => cacheEntry(entry)}
+                >
+                  <AppIcon icon={HardDriveDownloadIcon} />
+                </Button>
+              ) : null}
+            </article>
+          )
+        })}
         {entries.length === 0 ? (
           <div className="p-4 text-xs text-muted-foreground">
             This collection is empty.
@@ -2110,14 +2186,14 @@ function StickyPlayer({
 }: {
   player: PlayerState
   onClose: () => void
-  onSelectIndex: (index: number) => void
+  onSelectIndex: (index: number, play?: boolean) => void
 }) {
   return (
     <div className={playerChrome.bar}>
       <div className={playerChrome.inner}>
         <Button
           aria-label="Close player"
-          className="absolute top-4 right-[var(--landrop-shell-pad)] z-10 sm:right-[var(--landrop-shell-pad-wide)]"
+          className="absolute top-3 right-[var(--landrop-shell-pad)] z-10 sm:right-[var(--landrop-shell-pad-wide)]"
           title="Close player"
           type="button"
           variant="ghost"
@@ -2131,6 +2207,7 @@ function StickyPlayer({
           source={player.queue[player.currentIndex]}
           queue={player.queue}
           currentIndex={player.currentIndex}
+          playRequestId={player.playRequestId}
           onSelectIndex={onSelectIndex}
         />
       </div>
@@ -2143,13 +2220,15 @@ function AudioPlayer({
   source,
   queue,
   currentIndex = -1,
+  playRequestId,
   onSelectIndex,
 }: {
   compact?: boolean
   source?: AudioSource
   queue?: AudioSource[]
   currentIndex?: number
-  onSelectIndex?: (index: number) => void
+  playRequestId?: number
+  onSelectIndex?: (index: number, play?: boolean) => void
 }) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const [currentTime, setCurrentTime] = useState(0)
@@ -2217,6 +2296,10 @@ function AudioPlayer({
       goPrevious,
       goNext
     )
+
+    if (playRequestId) {
+      audio.play().catch(() => toast.error("Audio playback failed"))
+    }
   }
 
   const togglePlayback = () => {
@@ -2309,13 +2392,13 @@ function AudioPlayer({
 
   const goPrevious = () => {
     if (canGoPrevious && onSelectIndex) {
-      onSelectIndex(currentIndex - 1)
+      onSelectIndex(currentIndex - 1, displayedPlaying)
     }
   }
 
   const goNext = () => {
     if (canGoNext && onSelectIndex) {
-      onSelectIndex(currentIndex + 1)
+      onSelectIndex(currentIndex + 1, displayedPlaying)
     }
   }
 
@@ -2342,7 +2425,7 @@ function AudioPlayer({
   return (
     <div className={cn(playerChrome.body, !compact && "sm:p-4")}>
       <audio
-        key={source.src}
+        key={`${source.src}:${playRequestId ?? 0}`}
         ref={audioRef}
         preload="metadata"
         src={source.src}
@@ -2358,7 +2441,7 @@ function AudioPlayer({
           setPlaying(false)
 
           if (canGoNext && onSelectIndex) {
-            onSelectIndex(currentIndex + 1)
+            onSelectIndex(currentIndex + 1, true)
           }
         }}
         onError={() => {
@@ -2423,7 +2506,7 @@ function AudioPlayer({
           )}
           className={cn(
             "group relative cursor-pointer touch-none",
-            compact ? "h-6" : "h-8",
+            compact ? "h-7" : "h-9",
             (!sourceReady || displayedDuration <= 0) &&
               "pointer-events-none opacity-50"
           )}
@@ -2440,13 +2523,13 @@ function AudioPlayer({
             }
           }}
         >
-          <div className="absolute top-1/2 right-0 left-0 h-1 -translate-y-1/2 bg-border" />
+          <div className="absolute top-1/2 right-0 left-0 h-1.5 -translate-y-1/2 bg-border" />
           <div
-            className="absolute top-1/2 left-0 h-1 -translate-y-1/2 bg-primary"
+            className="absolute top-1/2 left-0 h-1.5 -translate-y-1/2 bg-primary"
             style={{ width: `${progress}%` }}
           />
           <div
-            className="absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 border bg-primary shadow-sm transition-transform group-hover:scale-110"
+            className="absolute top-1/2 size-4 -translate-x-1/2 -translate-y-1/2 border bg-primary shadow-sm transition-transform group-hover:scale-110"
             style={{ left: `${progress}%` }}
           />
         </div>
@@ -2478,7 +2561,7 @@ function AudioPlayer({
           </Button>
           <Button
             aria-label={displayedPlaying ? "Pause" : "Play"}
-            className={playerChrome.control}
+            className={playerChrome.playControl}
             title={displayedPlaying ? "Pause" : "Play"}
             type="button"
             variant="default"
