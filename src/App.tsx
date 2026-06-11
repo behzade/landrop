@@ -173,11 +173,11 @@ const appChrome = {
 
 const playerChrome = {
   bar: "shrink-0 overflow-hidden border-t bg-background/95 shadow-lg backdrop-blur",
-  body: "min-w-0 border bg-muted p-3",
+  body: "w-full max-w-full min-w-0 overflow-hidden border bg-muted p-3",
   control: "h-[var(--landrop-player-control)] w-full min-w-0",
-  controls: "grid grid-cols-5 gap-1.5 sm:gap-2",
+  controls: "grid w-full min-w-0 grid-cols-5 gap-1.5 sm:gap-2",
   inner:
-    "relative w-full min-w-0 px-[var(--landrop-shell-pad)] py-2 sm:px-[var(--landrop-shell-pad-wide)]",
+    "relative w-full max-w-full min-w-0 px-[var(--landrop-shell-pad)] py-2 sm:px-[var(--landrop-shell-pad-wide)]",
 }
 
 export function App() {
@@ -1754,8 +1754,8 @@ function FolderView({
   }
 
   return (
-    <section className="grid gap-3">
-      <div className="flex items-center gap-2">
+    <section className="grid min-w-0 gap-3">
+      <div className="flex min-w-0 items-center gap-2">
         <Button
           aria-label="Back to library"
           title="Back"
@@ -1766,7 +1766,7 @@ function FolderView({
         >
           <AppIcon icon={PreviousIcon} />
         </Button>
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <h2 className="truncate text-xl font-semibold">{item.name}</h2>
           <p className="truncate text-xs text-muted-foreground">Collection</p>
         </div>
@@ -1797,7 +1797,7 @@ function FolderView({
         ) : null}
       </div>
 
-      <div className="grid gap-2">
+      <div className="grid min-w-0 gap-2">
         {entries.map((entry) => (
           <button
             className="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 border bg-card/80 px-3 py-3 text-left text-sm hover:bg-muted"
@@ -2135,6 +2135,7 @@ function AudioPlayer({
   >("caches" in window ? "idle" : "unsupported")
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
+  const [loadedSourceSrc, setLoadedSourceSrc] = useState("")
   const [playbackRate, setPlaybackRate] = useState(1)
   const [playing, setPlaying] = useState(false)
   const [ready, setReady] = useState(false)
@@ -2151,6 +2152,12 @@ function AudioPlayer({
   const canGoNext = Boolean(
     queue && currentIndex >= 0 && currentIndex < queue.length - 1
   )
+  const sourceReady = ready && loadedSourceSrc === source.src
+  const displayedDuration = sourceReady ? duration : 0
+  const displayedCurrentTime = sourceReady
+    ? clamp(currentTime, 0, displayedDuration || currentTime)
+    : 0
+  const displayedPlaying = sourceReady && playing
   const progressKey = progressStorageKey(source.src)
 
   const saveProgress = (audio: HTMLAudioElement) => {
@@ -2173,12 +2180,15 @@ function AudioPlayer({
     const savedTime = readSavedProgress(progressKey, nextDuration)
 
     audio.playbackRate = playbackRate
+    setLoadedSourceSrc(source.src)
     setDuration(nextDuration)
     setReady(true)
 
     if (savedTime > 0 && Math.abs(audio.currentTime - savedTime) > 1) {
       audio.currentTime = savedTime
       setCurrentTime(savedTime)
+    } else {
+      setCurrentTime(audio.currentTime)
     }
 
     updateMediaSession(
@@ -2211,10 +2221,13 @@ function AudioPlayer({
       return
     }
 
+    const activeDuration = Number.isFinite(audio.duration)
+      ? audio.duration
+      : displayedDuration
     const nextTime = clamp(
       audio.currentTime + seconds,
       0,
-      Number.isFinite(audio.duration) ? audio.duration : audio.currentTime
+      activeDuration > 0 ? activeDuration : audio.currentTime
     )
 
     audio.currentTime = nextTime
@@ -2225,13 +2238,13 @@ function AudioPlayer({
   const seekToRatio = (clientX: number, element: HTMLElement) => {
     const audio = audioRef.current
 
-    if (!audio || !ready || duration <= 0) {
+    if (!audio || !sourceReady || displayedDuration <= 0) {
       return
     }
 
     const bounds = element.getBoundingClientRect()
     const ratio = clamp((clientX - bounds.left) / bounds.width, 0, 1)
-    const nextTime = ratio * duration
+    const nextTime = ratio * displayedDuration
     const wasPlaying = !audio.paused
 
     audio.currentTime = nextTime
@@ -2246,7 +2259,7 @@ function AudioPlayer({
   const seekByKeyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const audio = audioRef.current
 
-    if (!audio || !ready || duration <= 0) {
+    if (!audio || !sourceReady || displayedDuration <= 0) {
       return
     }
 
@@ -2269,8 +2282,8 @@ function AudioPlayer({
 
     if (event.key === "End") {
       event.preventDefault()
-      audio.currentTime = duration
-      setCurrentTime(duration)
+      audio.currentTime = displayedDuration
+      setCurrentTime(displayedDuration)
       saveProgress(audio)
     }
   }
@@ -2352,7 +2365,9 @@ function AudioPlayer({
   }
 
   const progress =
-    duration > 0 ? clamp((currentTime / duration) * 100, 0, 100) : 0
+    displayedDuration > 0
+      ? clamp((displayedCurrentTime / displayedDuration) * 100, 0, 100)
+      : 0
 
   return (
     <div className={cn(playerChrome.body, !compact && "sm:p-4")}>
@@ -2392,6 +2407,7 @@ function AudioPlayer({
         onTimeUpdate={(event) => {
           const audio = event.currentTarget
 
+          setLoadedSourceSrc(source.src)
           setCurrentTime(audio.currentTime)
           saveProgress(audio)
         }}
@@ -2407,7 +2423,8 @@ function AudioPlayer({
           <div className="min-w-0">
             <p className="truncate text-sm font-medium">{source.name}</p>
             <p className="font-mono text-xs text-muted-foreground">
-              {formatDuration(currentTime)} / {formatDuration(duration)}
+              {formatDuration(displayedCurrentTime)} /{" "}
+              {formatDuration(displayedDuration)}
             </p>
           </div>
           <Badge
@@ -2420,16 +2437,20 @@ function AudioPlayer({
 
         <div
           aria-label="Playback position"
-          aria-valuemax={Math.max(duration, 0)}
+          aria-valuemax={Math.max(displayedDuration, 0)}
           aria-valuemin={0}
-          aria-valuenow={Math.min(currentTime, duration || currentTime)}
+          aria-valuenow={Math.min(
+            displayedCurrentTime,
+            displayedDuration || displayedCurrentTime
+          )}
           className={cn(
             "group relative cursor-pointer touch-none",
             compact ? "h-6" : "h-8",
-            (!ready || duration <= 0) && "pointer-events-none opacity-50"
+            (!sourceReady || displayedDuration <= 0) &&
+              "pointer-events-none opacity-50"
           )}
           role="slider"
-          tabIndex={ready && duration > 0 ? 0 : -1}
+          tabIndex={sourceReady && displayedDuration > 0 ? 0 : -1}
           onKeyDown={seekByKeyboard}
           onPointerDown={(event) => {
             event.currentTarget.setPointerCapture(event.pointerId)
@@ -2472,22 +2493,22 @@ function AudioPlayer({
             type="button"
             variant="outline"
             size="icon"
-            disabled={!ready}
+            disabled={!sourceReady}
             onClick={() => skip(-15)}
           >
             <AppIcon icon={GoBackward15SecIcon} />
           </Button>
           <Button
-            aria-label={playing ? "Pause" : "Play"}
+            aria-label={displayedPlaying ? "Pause" : "Play"}
             className={playerChrome.control}
-            title={playing ? "Pause" : "Play"}
+            title={displayedPlaying ? "Pause" : "Play"}
             type="button"
             variant="default"
             size="icon"
-            disabled={!ready}
+            disabled={!sourceReady}
             onClick={togglePlayback}
           >
-            <AppIcon icon={playing ? PauseIcon : PlayIcon} />
+            <AppIcon icon={displayedPlaying ? PauseIcon : PlayIcon} />
           </Button>
           <Button
             aria-label="Skip forward 30 seconds"
@@ -2496,7 +2517,7 @@ function AudioPlayer({
             type="button"
             variant="outline"
             size="icon"
-            disabled={!ready}
+            disabled={!sourceReady}
             onClick={() => skip(30)}
           >
             <AppIcon icon={GoForward30SecIcon} />
