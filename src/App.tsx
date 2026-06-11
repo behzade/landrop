@@ -24,6 +24,7 @@ import {
   FolderUploadIcon,
   GoBackward15SecIcon,
   GoForward30SecIcon,
+  HardDriveDownloadIcon,
   Image01Icon,
   InboxIcon,
   Key01Icon,
@@ -1491,18 +1492,6 @@ function HomeView({
           <h2 className="truncate text-xl font-semibold">Library</h2>
           <p className="truncate text-xs text-muted-foreground">{status}</p>
         </div>
-        <Button
-          variant="outline"
-          size="icon-sm"
-          aria-label="Open JSON"
-          title="Open JSON"
-          render={
-            <a href="/api/items">
-              <AppIcon icon={File02Icon} />
-              <span className="sr-only">JSON</span>
-            </a>
-          }
-        />
       </div>
 
       <div className="flex flex-col gap-2 border bg-muted/30 p-2 lg:flex-row lg:items-center lg:justify-between">
@@ -1745,6 +1734,34 @@ function FolderView({
     onOpenEntry(entry)
   }
 
+  const cacheEntry = (entry: FolderEntry) => {
+    if (!("caches" in window)) {
+      toast.error("Offline cache is not available in this browser")
+      return
+    }
+
+    const url = folderFileUrl(item.id, item.created_at, entry.path, "open")
+
+    caches
+      .open("landrop-media-v1")
+      .then((cache) =>
+        fetch(url, { credentials: "include" })
+          .then(throwIfNotOk)
+          .then((response) => cache.put(url, response))
+      )
+      .then(() => {
+        toast.success("Saved offline", {
+          description: entry.name,
+        })
+      })
+      .catch((error: unknown) => {
+        toast.error("Could not save offline", {
+          description:
+            error instanceof Error ? error.message : "Offline cache failed",
+        })
+      })
+  }
+
   if (status === "loading") {
     return <LoadingPanel label="Loading collection..." />
   }
@@ -1772,14 +1789,6 @@ function FolderView({
         </div>
       </div>
 
-      {audioSources.length > 0 ? (
-        <div className="border bg-muted/30 p-3 text-xs text-muted-foreground">
-          {player?.contextId === item.id
-            ? "Continue listening"
-            : "Ready to play"}
-        </div>
-      ) : null}
-
       <div className="flex min-h-11 flex-wrap items-center justify-between gap-2 border bg-muted/60 px-3 py-2">
         <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
           <AppIcon icon={Folder01Icon} />
@@ -1799,22 +1808,35 @@ function FolderView({
 
       <div className="grid min-w-0 gap-2">
         {entries.map((entry) => (
-          <button
-            className="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 border bg-card/80 px-3 py-3 text-left text-sm hover:bg-muted"
+          <article
+            className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border bg-card/80 text-sm hover:bg-muted"
             key={entry.path}
-            type="button"
-            onClick={() => openEntry(entry)}
           >
-            <AppIcon
-              icon={entry.kind === "folder" ? Folder01Icon : iconForFile(entry)}
-            />
-            <span className="min-w-0 truncate">{entry.name}</span>
-            <span className="hidden max-w-20 truncate text-right text-xs text-muted-foreground sm:block">
-              {entry.kind === "folder"
-                ? "Collection"
-                : numberFormat.format(entry.size)}
-            </span>
-          </button>
+            <button
+              className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 px-3 py-3 text-left"
+              type="button"
+              onClick={() => openEntry(entry)}
+            >
+              <AppIcon
+                icon={
+                  entry.kind === "folder" ? Folder01Icon : iconForFile(entry)
+                }
+              />
+              <span className="min-w-0 truncate">{entry.name}</span>
+            </button>
+            {isAudioLike(entry) ? (
+              <Button
+                aria-label={`Save ${entry.name} offline`}
+                title="Save offline"
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => cacheEntry(entry)}
+              >
+                <AppIcon icon={HardDriveDownloadIcon} />
+              </Button>
+            ) : null}
+          </article>
         ))}
         {entries.length === 0 ? (
           <div className="p-4 text-xs text-muted-foreground">
@@ -2130,9 +2152,6 @@ function AudioPlayer({
   onSelectIndex?: (index: number) => void
 }) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
-  const [cacheStatus, setCacheStatus] = useState<
-    "unsupported" | "checking" | "idle" | "caching" | "cached" | "error"
-  >("caches" in window ? "idle" : "unsupported")
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [loadedSourceSrc, setLoadedSourceSrc] = useState("")
@@ -2315,55 +2334,6 @@ function AudioPlayer({
     setPlaybackRate(nextRate)
   }
 
-  const keepOffline = () => {
-    if (!("caches" in window)) {
-      setCacheStatus("unsupported")
-      return
-    }
-
-    setCacheStatus("caching")
-
-    fetch(source.src, { credentials: "include" })
-      .then(throwIfNotOk)
-      .then((response) =>
-        caches
-          .open("landrop-media-v1")
-          .then((cache) => cache.put(source.src, response))
-      )
-      .then(() => {
-        setCacheStatus("cached")
-        toast.success("Saved for offline listening", {
-          description: source.name,
-        })
-      })
-      .catch((error: unknown) => {
-        setCacheStatus("error")
-        toast.error("Could not cache audio", {
-          description:
-            error instanceof Error ? error.message : "Offline save failed",
-        })
-      })
-  }
-
-  const removeOffline = () => {
-    if (!("caches" in window)) {
-      return
-    }
-
-    caches
-      .open("landrop-media-v1")
-      .then((cache) => cache.delete(source.src))
-      .then(() => {
-        setCacheStatus("idle")
-        toast.success("Removed offline copy", {
-          description: source.name,
-        })
-      })
-      .catch(() => {
-        setCacheStatus("error")
-      })
-  }
-
   const progress =
     displayedDuration > 0
       ? clamp((displayedCurrentTime / displayedDuration) * 100, 0, 100)
@@ -2417,7 +2387,7 @@ function AudioPlayer({
         <div
           className={cn(
             "flex min-w-0 items-start justify-between gap-3",
-            compact && "pr-8"
+            compact && (source.downloadUrl ? "pr-14" : "pr-8")
           )}
         >
           <div className="min-w-0">
@@ -2427,12 +2397,20 @@ function AudioPlayer({
               {formatDuration(displayedDuration)}
             </p>
           </div>
-          <Badge
-            className={cn("shrink-0", compact && "hidden sm:inline-flex")}
-            variant={cacheStatus === "cached" ? "default" : "outline"}
-          >
-            {cacheStatus === "cached" ? "Offline" : "Stream"}
-          </Badge>
+          {source.downloadUrl ? (
+            <Button
+              aria-label="Download audio file"
+              className="shrink-0"
+              title="Download file"
+              variant="outline"
+              size="icon-xs"
+              render={
+                <a href={source.downloadUrl}>
+                  <AppIcon icon={Download04Icon} />
+                </a>
+              }
+            />
+          ) : null}
         </div>
 
         <div
@@ -2556,50 +2534,6 @@ function AudioPlayer({
               ))}
             </select>
           </label>
-          {cacheStatus === "cached" ? (
-            <Button
-              aria-label="Remove offline copy"
-              title="Remove offline copy"
-              type="button"
-              variant="outline"
-              size="icon-xs"
-              onClick={removeOffline}
-            >
-              <AppIcon icon={Delete02Icon} />
-            </Button>
-          ) : (
-            <Button
-              aria-label="Keep offline"
-              title="Keep offline"
-              type="button"
-              variant="outline"
-              size="icon-xs"
-              disabled={
-                cacheStatus === "caching" || cacheStatus === "unsupported"
-              }
-              onClick={keepOffline}
-            >
-              <AppIcon
-                icon={
-                  cacheStatus === "caching" ? Loading03Icon : Download04Icon
-                }
-                className={cacheStatus === "caching" ? "animate-spin" : ""}
-              />
-            </Button>
-          )}
-          {source.downloadUrl ? (
-            <Button
-              aria-label="Save audio file"
-              title="Save audio file"
-              variant="outline"
-              size="icon-xs"
-              render={
-                <a href={source.downloadUrl}>
-                  <AppIcon icon={Download04Icon} />
-                </a>
-              }
-            />
-          ) : null}
         </div>
       </div>
     </div>
