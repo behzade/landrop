@@ -2,6 +2,7 @@ import {
   type ChangeEvent,
   type DragEvent,
   type FormEvent,
+  useCallback,
   useRef,
   useEffect,
   useMemo,
@@ -21,15 +22,17 @@ import {
   Folder01Icon,
   FolderOpenIcon,
   FolderUploadIcon,
-  GoBackward10SecIcon,
-  GoForward10SecIcon,
+  GoBackward15SecIcon,
+  GoForward30SecIcon,
   Image01Icon,
   InboxIcon,
   Key01Icon,
   Loading03Icon,
   MusicNote01Icon,
+  NextIcon,
   PauseIcon,
   PlayIcon,
+  PreviousIcon,
   QrCodeScanIcon,
   Search01Icon,
   SentIcon,
@@ -38,17 +41,14 @@ import {
   TextIcon,
   Upload04Icon,
   UserAccountIcon,
-  VolumeHighIcon,
 } from "@hugeicons/core-free-icons"
 import { toDataURL } from "qrcode"
 import { toast } from "sonner"
-import WaveSurfer from "wavesurfer.js"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Card,
-  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
@@ -65,7 +65,6 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { Textarea } from "@/components/ui/textarea"
 import landropLogoUrl from "@/assets/landrop.svg"
 import { cn } from "@/lib/utils"
@@ -94,6 +93,29 @@ type FolderResponse = {
   entries: FolderEntry[]
 }
 
+type FolderAudioResponse = {
+  entries: FolderEntry[]
+}
+
+type AudioSource = {
+  id: string
+  name: string
+  src: string
+  downloadUrl?: string
+}
+
+type PlayerState = {
+  contextId: string
+  queue: AudioSource[]
+  currentIndex: number
+}
+
+type ActiveView =
+  | { kind: "home" }
+  | { kind: "folder"; item: Item; path: string }
+  | { kind: "item"; item: Item }
+  | { kind: "folder-entry"; folder: Item; entry: FolderEntry }
+
 type TrustedDevice = {
   id: string
   name: string
@@ -111,13 +133,6 @@ type AuthStatus = {
   currentDevice: TrustedDevice | null
 }
 
-type Preview =
-  | { status: "idle" }
-  | { status: "loading"; item: Item }
-  | { status: "ready"; item: Item; url?: string; text?: string }
-  | { status: "error"; item: Item; message: string }
-
-type PreviewPayload = { url?: string; text?: string }
 type InboxFilter = "all" | "text" | "files" | "images" | "audio"
 type SortKey = "newest" | "oldest" | "name" | "size"
 type UploadTab = "text" | "file" | "folder" | "clipboard"
@@ -145,9 +160,27 @@ const sortLabels: Record<SortKey, string> = {
   size: "Largest",
 }
 
+const appChrome = {
+  content:
+    "mx-auto w-full max-w-[var(--landrop-shell-max)] min-w-0 px-[var(--landrop-shell-pad)] py-3 pb-[var(--landrop-player-reserve)] sm:px-[var(--landrop-shell-pad-wide)] sm:py-4",
+  header:
+    "sticky top-0 z-20 border-b bg-background/95 px-[var(--landrop-shell-pad)] py-2 backdrop-blur sm:px-[var(--landrop-shell-pad-wide)]",
+  shell:
+    "mx-auto flex w-full max-w-[var(--landrop-shell-max)] min-w-0 items-center justify-between gap-3",
+}
+
+const playerChrome = {
+  bar: "fixed inset-x-0 bottom-0 z-30 w-full max-w-full overflow-hidden border-t bg-background/95 shadow-lg backdrop-blur",
+  body: "min-w-0 border bg-muted p-3",
+  control: "h-[var(--landrop-player-control)] w-full min-w-0",
+  controls: "grid grid-cols-5 gap-1.5 sm:gap-2",
+  inner:
+    "relative mx-auto w-full max-w-[var(--landrop-shell-max)] min-w-0 px-[var(--landrop-shell-pad)] py-2 sm:px-[var(--landrop-shell-pad-wide)]",
+}
+
 export function App() {
   const [items, setItems] = useState<Item[]>([])
-  const [status, setStatus] = useState("Loading recent drops...")
+  const [status, setStatus] = useState("Loading library...")
   const [trusted, setTrusted] = useState<boolean | null>(null)
   const [pairingCode, setPairingCode] = useState(initialUrlPairingCode)
   const [pairingCodeSource, setPairingCodeSource] = useState<"manual" | "url">(
@@ -167,7 +200,8 @@ export function App() {
   const [deviceSaving, setDeviceSaving] = useState(false)
   const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null)
   const [removingItemId, setRemovingItemId] = useState<string | null>(null)
-  const [preview, setPreview] = useState<Preview>({ status: "idle" })
+  const [activeView, setActiveView] = useState<ActiveView>({ kind: "home" })
+  const [player, setPlayer] = useState<PlayerState | null>(null)
   const [copyStatus, setCopyStatus] = useState("Copy")
   const [pasteSubmitting, setPasteSubmitting] = useState(false)
   const [uploadSubmitting, setUploadSubmitting] = useState(false)
@@ -263,7 +297,7 @@ export function App() {
         .then((nextItems) => {
           if (!cancelled) {
             setItems(nextItems)
-            setStatus(nextItems.length ? "Recent drops" : "No drops yet")
+            setStatus(nextItems.length ? "Library" : "No collections yet")
           }
         })
         .catch((error: unknown) => {
@@ -357,14 +391,6 @@ export function App() {
     }
   }, [connectUrl])
 
-  useEffect(() => {
-    return () => {
-      if (preview.status === "ready" && preview.url) {
-        URL.revokeObjectURL(preview.url)
-      }
-    }
-  }, [preview])
-
   const itemCounts = useMemo(
     () => ({
       all: items.length,
@@ -414,64 +440,53 @@ export function App() {
     })
   }, [inboxFilter, items, sortKey])
 
-  const openPreview = (item: Item) => {
-    setCopyStatus("Copy")
-    setPreview((current) => {
-      if (current.status === "ready" && current.url) {
-        URL.revokeObjectURL(current.url)
-      }
+  const navigate = useCallback((nextView: ActiveView) => {
+    setActiveView(nextView)
+    writeActiveViewToUrl(nextView, "push")
+  }, [])
 
-      return { status: "loading", item }
-    })
+  useEffect(() => {
+    const applyUrlView = () => {
+      const nextView = readActiveViewFromUrl(items)
+
+      if (nextView) {
+        setActiveView(nextView)
+      }
+    }
+
+    applyUrlView()
+    window.addEventListener("popstate", applyUrlView)
+
+    return () => {
+      window.removeEventListener("popstate", applyUrlView)
+    }
+  }, [items])
+
+  const openItem = (item: Item) => {
+    setCopyStatus("Copy")
 
     if (isFolderItem(item)) {
-      setPreview({ status: "ready", item })
+      navigate({ kind: "folder", item, path: "" })
       return
     }
 
     if (isAudioPreview(item)) {
-      setPreview({
-        status: "ready",
-        item,
-        url: `/api/items/${item.id}/open`,
+      setPlayer({
+        contextId: item.id,
+        queue: [
+          {
+            id: item.id,
+            name: item.name,
+            src: `/api/items/${item.id}/open`,
+            downloadUrl: `/api/items/${item.id}/download`,
+          },
+        ],
+        currentIndex: 0,
       })
       return
     }
 
-    fetch(`/api/items/${item.id}/open`, { cache: "no-store" })
-      .then<PreviewPayload>((response) => {
-        if (!response.ok) {
-          throw new Error(`Request failed with ${response.status}`)
-        }
-
-        if (isTextPreview(item)) {
-          return response.text().then((text) => ({ text }))
-        }
-
-        if (isImagePreview(item)) {
-          return response.blob().then((blob) => ({
-            url: URL.createObjectURL(blob),
-          }))
-        }
-
-        return { text: "" }
-      })
-      .then((nextPreview) => {
-        setPreview({ ...nextPreview, status: "ready", item })
-      })
-      .catch((error: unknown) => {
-        const message =
-          error instanceof Error ? error.message : "Failed to load"
-
-        setPreview({
-          status: "error",
-          item,
-          message,
-        })
-        toast.error("Could not open item", {
-          description: message,
-        })
-      })
+    navigate({ kind: "item", item })
   }
 
   const removeItem = (item: Item) => {
@@ -489,13 +504,26 @@ export function App() {
         setItems((current) =>
           current.filter((currentItem) => currentItem.id !== item.id)
         )
-        setPreview((current) => {
-          if (current.status !== "idle" && current.item.id === item.id) {
-            if (current.status === "ready" && current.url) {
-              URL.revokeObjectURL(current.url)
-            }
+        setActiveView((current) => {
+          if (
+            (current.kind === "folder" || current.kind === "item") &&
+            current.item.id === item.id
+          ) {
+            return { kind: "home" }
+          }
 
-            return { status: "idle" }
+          if (
+            current.kind === "folder-entry" &&
+            current.folder.id === item.id
+          ) {
+            return { kind: "home" }
+          }
+
+          return current
+        })
+        setPlayer((current) => {
+          if (current?.contextId === item.id) {
+            return null
           }
 
           return current
@@ -512,25 +540,6 @@ export function App() {
       })
       .finally(() => {
         setRemovingItemId(null)
-      })
-  }
-
-  const copyPreviewText = () => {
-    if (preview.status !== "ready" || typeof preview.text !== "string") {
-      return
-    }
-
-    navigator.clipboard
-      .writeText(preview.text)
-      .then(() => {
-        setCopyStatus("Copied")
-        toast.success("Copied to clipboard")
-        window.setTimeout(() => setCopyStatus("Copy"), 1200)
-      })
-      .catch(() => {
-        setCopyStatus("Copy failed")
-        toast.error("Clipboard copy failed")
-        window.setTimeout(() => setCopyStatus("Copy"), 1200)
       })
   }
 
@@ -643,7 +652,7 @@ export function App() {
     const path = String(formData.get("path") ?? "").trim()
 
     if (!path) {
-      toast.warning("Folder path is empty", {
+      toast.warning("Collection path is empty", {
         description: "Enter a folder path from the LAN Drop server device.",
       })
       return
@@ -659,14 +668,14 @@ export function App() {
       .then(() => {
         form.reset()
         setSendOpen(false)
-        toast.success("Folder served", {
+        toast.success("Collection added", {
           description: path,
         })
       })
       .catch((error: unknown) => {
-        toast.error("Folder failed", {
+        toast.error("Collection failed", {
           description:
-            error instanceof Error ? error.message : "Could not serve folder",
+            error instanceof Error ? error.message : "Could not add collection",
         })
       })
       .finally(() => {
@@ -979,282 +988,293 @@ export function App() {
   }
 
   return (
-    <main className="min-h-svh bg-background px-3 py-3 text-foreground sm:px-5">
-      <div className="mx-auto mb-3 flex max-w-7xl items-center justify-between gap-3 border-b pb-3">
-        <div className="flex min-w-0 items-center gap-3">
-          <img alt="" className="size-8 shrink-0" src={landropLogoUrl} />
-          <div className="min-w-0">
-            <h1 className="truncate text-base font-semibold">LAN Drop</h1>
-            <p className="truncate text-xs text-muted-foreground">
-              {numberFormat.format(visibleItems.length)} shown of{" "}
-              {numberFormat.format(items.length)}
-            </p>
+    <main className="min-h-svh w-full max-w-full overflow-x-hidden bg-background text-foreground">
+      <div className={appChrome.header}>
+        <div className={appChrome.shell}>
+          <div className="flex min-w-0 items-center gap-3">
+            <img alt="" className="size-8 shrink-0" src={landropLogoUrl} />
+            <div className="min-w-0">
+              <h1 className="truncate text-base font-semibold">Shelf</h1>
+              <p className="truncate text-xs text-muted-foreground">
+                {numberFormat.format(visibleItems.length)} shown of{" "}
+                {numberFormat.format(items.length)}
+              </p>
+            </div>
           </div>
-        </div>
-        <div className="flex shrink-0 gap-2">
-          <Dialog open={sendOpen} onOpenChange={setSendOpen}>
-            <DialogTrigger
-              render={
-                <Button
-                  className="h-9 px-3 text-xs"
-                  type="button"
-                  variant="default"
-                />
-              }
-            >
-              <AppIcon icon={Add01Icon} />
-              New drop
-            </DialogTrigger>
-            <DialogContent className="max-h-[calc(100svh-2rem)] overflow-hidden sm:max-w-2xl">
-              <DialogHeader>
-                <DialogTitle>Add to inbox</DialogTitle>
-                <DialogDescription>
-                  Send text, upload a file, or pull an image from the clipboard.
-                </DialogDescription>
-              </DialogHeader>
+          <div className="flex shrink-0 gap-2">
+            <Dialog open={sendOpen} onOpenChange={setSendOpen}>
+              <DialogTrigger
+                render={
+                  <Button
+                    aria-label="Add"
+                    className="size-9"
+                    title="Add"
+                    type="button"
+                    variant="default"
+                  />
+                }
+              >
+                <AppIcon icon={Add01Icon} />
+                <span className="sr-only">Add</span>
+              </DialogTrigger>
+              <DialogContent className="sm:max-w-2xl">
+                <DialogHeader>
+                  <DialogTitle>Add to library</DialogTitle>
+                  <DialogDescription>
+                    Send text, upload a file, or pull an image from the
+                    clipboard.
+                  </DialogDescription>
+                </DialogHeader>
 
-              <div className="grid gap-4 overflow-hidden">
-                <div className="grid grid-cols-4 border">
-                  {[
-                    { key: "text", label: "Text", icon: TextIcon },
-                    { key: "file", label: "File", icon: FolderUploadIcon },
-                    { key: "folder", label: "Folder", icon: FolderOpenIcon },
-                    {
-                      key: "clipboard",
-                      label: "Clipboard",
-                      icon: ClipboardIcon,
-                    },
-                  ].map((tab) => (
-                    <button
-                      className={cn(
-                        "flex h-10 items-center justify-center gap-2 border-r text-xs last:border-r-0 hover:bg-muted",
-                        uploadTab === tab.key && "bg-muted text-foreground"
-                      )}
-                      key={tab.key}
-                      type="button"
-                      onClick={() => setUploadTab(tab.key as UploadTab)}
-                    >
-                      <AppIcon icon={tab.icon} />
-                      {tab.label}
-                    </button>
-                  ))}
-                </div>
-
-                {uploadTab === "text" ? (
-                  <form className="grid gap-3" onSubmit={submitPaste}>
-                    <Label
-                      className="flex items-center gap-2 text-muted-foreground uppercase"
-                      htmlFor="drop-text"
-                    >
-                      <AppIcon icon={TextIcon} />
-                      Paste text / JSON
-                    </Label>
-                    <Textarea
-                      id="drop-text"
-                      name="text"
-                      className="max-h-80 min-h-64 resize-y overflow-hidden bg-background/80 p-4 font-mono text-sm leading-6"
-                      placeholder='{"from": "phone", "to": "desktop"}'
-                    />
-                    <Button
-                      className="h-11 w-full text-sm"
-                      type="submit"
-                      disabled={pasteSubmitting}
-                    >
-                      <AppIcon icon={SentIcon} />
-                      {pasteSubmitting ? "Sending..." : "Send paste"}
-                    </Button>
-                  </form>
-                ) : null}
-
-                {uploadTab === "file" ? (
-                  <form className="grid gap-3" onSubmit={submitUpload}>
-                    <div
-                      className={cn(
-                        "grid min-h-44 place-items-center border border-dashed bg-muted/40 p-6 text-center transition-colors",
-                        dropActive && "border-primary bg-primary/10"
-                      )}
-                      onDragLeave={() => setDropActive(false)}
-                      onDragOver={(event) => {
-                        event.preventDefault()
-                        setDropActive(true)
-                      }}
-                      onDrop={dropUploadFile}
-                    >
-                      <div className="grid gap-3">
-                        <div className="mx-auto flex size-12 items-center justify-center border bg-background">
-                          <AppIcon
-                            icon={Upload04Icon}
-                            className="size-5 text-primary"
-                          />
-                        </div>
-                        <div>
-                          <p className="text-sm font-medium">
-                            {selectedFile
-                              ? selectedFile.name
-                              : "Drop a file here"}
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {selectedFile
-                              ? `${numberFormat.format(selectedFile.size)} bytes`
-                              : "or choose a file from this device"}
-                          </p>
-                        </div>
-                        <Input
-                          className="h-10 bg-background"
-                          type="file"
-                          name="file"
-                          onChange={selectUploadFile}
-                        />
-                      </div>
-                    </div>
-                    <Button
-                      className="h-11 w-full text-sm"
-                      type="submit"
-                      disabled={uploadSubmitting}
-                    >
-                      <AppIcon icon={FileUploadIcon} />
-                      {uploadSubmitting ? "Uploading..." : "Upload file"}
-                    </Button>
-                  </form>
-                ) : null}
-
-                {uploadTab === "folder" ? (
-                  <form className="grid gap-3" onSubmit={submitFolder}>
-                    <div className="grid min-h-44 place-items-center border border-dashed bg-muted/40 p-6 text-center">
-                      <div className="grid w-full max-w-lg gap-3">
-                        <div className="mx-auto flex size-12 items-center justify-center border bg-background">
-                          <AppIcon
-                            icon={FolderOpenIcon}
-                            className="size-5 text-primary"
-                          />
-                        </div>
-                        <div>
-                          <p className="text-sm font-medium">
-                            Serve a folder in place
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            Use a path on the device running LAN Drop.
-                          </p>
-                        </div>
-                        <Input
-                          className="h-10 bg-background font-mono text-xs"
-                          name="path"
-                          placeholder="~/Music"
-                        />
-                      </div>
-                    </div>
-                    <Button
-                      className="h-11 w-full text-sm"
-                      type="submit"
-                      disabled={folderSubmitting}
-                    >
-                      <AppIcon icon={FolderOpenIcon} />
-                      {folderSubmitting ? "Serving..." : "Serve folder"}
-                    </Button>
-                  </form>
-                ) : null}
-
-                {uploadTab === "clipboard" ? (
-                  <div className="grid gap-3">
-                    <div className="grid min-h-56 place-items-center border bg-muted/40 p-6 text-center">
-                      <div className="grid gap-3">
-                        <div className="mx-auto flex size-12 items-center justify-center border bg-background">
-                          <AppIcon
-                            icon={Image01Icon}
-                            className="size-5 text-primary"
-                          />
-                        </div>
-                        <div>
-                          <p className="text-sm font-medium">
-                            Upload clipboard image
-                          </p>
-                          <p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">
-                            Copy an image or screenshot, then let LAN Drop read
-                            it from the browser clipboard.
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                    <Button
-                      className="h-11 w-full text-sm"
-                      type="button"
-                      disabled={uploadSubmitting}
-                      onClick={uploadClipboardImage}
-                    >
-                      <AppIcon icon={ClipboardCopyIcon} />
-                      {uploadSubmitting
-                        ? "Uploading..."
-                        : "Upload image from clipboard"}
-                    </Button>
+                <div className="grid gap-4">
+                  <div className="grid grid-cols-4 border">
+                    {[
+                      { key: "text", label: "Text", icon: TextIcon },
+                      { key: "file", label: "File", icon: FolderUploadIcon },
+                      {
+                        key: "folder",
+                        label: "Collection",
+                        icon: FolderOpenIcon,
+                      },
+                      {
+                        key: "clipboard",
+                        label: "Clipboard",
+                        icon: ClipboardIcon,
+                      },
+                    ].map((tab) => (
+                      <button
+                        className={cn(
+                          "flex h-10 items-center justify-center gap-2 border-r text-xs last:border-r-0 hover:bg-muted",
+                          uploadTab === tab.key && "bg-muted text-foreground"
+                        )}
+                        key={tab.key}
+                        type="button"
+                        onClick={() => setUploadTab(tab.key as UploadTab)}
+                      >
+                        <AppIcon icon={tab.icon} />
+                        {tab.label}
+                      </button>
+                    ))}
                   </div>
-                ) : null}
-              </div>
-            </DialogContent>
-          </Dialog>
 
-          <Dialog>
-            <DialogTrigger
-              render={
-                <Button
-                  className="h-9 px-3 text-xs"
-                  type="button"
-                  variant="outline"
-                />
-              }
-            >
-              <AppIcon icon={ComputerPhoneSyncIcon} />
-              Devices
-            </DialogTrigger>
-            <DialogContent className="max-h-[calc(100svh-2rem)] overflow-hidden sm:max-w-xl">
-              <DialogHeader>
-                <DialogTitle>Trusted browsers</DialogTitle>
-                <DialogDescription>
-                  Rename this browser or revoke paired devices.
-                </DialogDescription>
-              </DialogHeader>
-
-              <div className="grid gap-4 overflow-hidden">
-                {currentDeviceId ? (
-                  <form className="grid gap-2" onSubmit={submitDeviceName}>
-                    <Label
-                      className="tracking-[0.2em] text-muted-foreground uppercase"
-                      htmlFor="device-name"
-                    >
-                      This device
-                    </Label>
-                    <div className="flex gap-2">
-                      <Input
-                        className="min-w-0 bg-background/80"
-                        id="device-name"
-                        value={deviceName}
-                        onChange={(event) => setDeviceName(event.target.value)}
+                  {uploadTab === "text" ? (
+                    <form className="grid gap-3" onSubmit={submitPaste}>
+                      <Label
+                        className="flex items-center gap-2 text-muted-foreground uppercase"
+                        htmlFor="drop-text"
+                      >
+                        <AppIcon icon={TextIcon} />
+                        Paste text / JSON
+                      </Label>
+                      <Textarea
+                        id="drop-text"
+                        name="text"
+                        className="min-h-64 resize-y bg-background/80 p-4 font-mono text-sm leading-6"
+                        placeholder='{"from": "phone", "to": "desktop"}'
                       />
                       <Button
-                        className="shrink-0"
+                        className="h-11 w-full text-sm"
                         type="submit"
-                        disabled={deviceSaving}
+                        disabled={pasteSubmitting}
                       >
-                        {deviceSaving ? "Saving..." : "Save"}
+                        <AppIcon icon={SentIcon} />
+                        {pasteSubmitting ? "Sending..." : "Send paste"}
+                      </Button>
+                    </form>
+                  ) : null}
+
+                  {uploadTab === "file" ? (
+                    <form className="grid gap-3" onSubmit={submitUpload}>
+                      <div
+                        className={cn(
+                          "grid min-h-44 place-items-center border border-dashed bg-muted/40 p-6 text-center transition-colors",
+                          dropActive && "border-primary bg-primary/10"
+                        )}
+                        onDragLeave={() => setDropActive(false)}
+                        onDragOver={(event) => {
+                          event.preventDefault()
+                          setDropActive(true)
+                        }}
+                        onDrop={dropUploadFile}
+                      >
+                        <div className="grid gap-3">
+                          <div className="mx-auto flex size-12 items-center justify-center border bg-background">
+                            <AppIcon
+                              icon={Upload04Icon}
+                              className="size-5 text-primary"
+                            />
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium">
+                              {selectedFile
+                                ? selectedFile.name
+                                : "Drop a file here"}
+                            </p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {selectedFile
+                                ? `${numberFormat.format(selectedFile.size)} bytes`
+                                : "or choose a file from this device"}
+                            </p>
+                          </div>
+                          <Input
+                            className="h-10 bg-background"
+                            type="file"
+                            name="file"
+                            onChange={selectUploadFile}
+                          />
+                        </div>
+                      </div>
+                      <Button
+                        className="h-11 w-full text-sm"
+                        type="submit"
+                        disabled={uploadSubmitting}
+                      >
+                        <AppIcon icon={FileUploadIcon} />
+                        {uploadSubmitting ? "Uploading..." : "Upload file"}
+                      </Button>
+                    </form>
+                  ) : null}
+
+                  {uploadTab === "folder" ? (
+                    <form className="grid gap-3" onSubmit={submitFolder}>
+                      <div className="grid min-h-44 place-items-center border border-dashed bg-muted/40 p-6 text-center">
+                        <div className="grid w-full max-w-lg gap-3">
+                          <div className="mx-auto flex size-12 items-center justify-center border bg-background">
+                            <AppIcon
+                              icon={FolderOpenIcon}
+                              className="size-5 text-primary"
+                            />
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium">
+                              Add a collection
+                            </p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              Use a folder path on the device running LAN Drop.
+                            </p>
+                          </div>
+                          <Input
+                            className="h-10 bg-background font-mono text-xs"
+                            name="path"
+                            placeholder="~/Music"
+                          />
+                        </div>
+                      </div>
+                      <Button
+                        className="h-11 w-full text-sm"
+                        type="submit"
+                        disabled={folderSubmitting}
+                      >
+                        <AppIcon icon={FolderOpenIcon} />
+                        {folderSubmitting ? "Adding..." : "Add collection"}
+                      </Button>
+                    </form>
+                  ) : null}
+
+                  {uploadTab === "clipboard" ? (
+                    <div className="grid gap-3">
+                      <div className="grid min-h-56 place-items-center border bg-muted/40 p-6 text-center">
+                        <div className="grid gap-3">
+                          <div className="mx-auto flex size-12 items-center justify-center border bg-background">
+                            <AppIcon
+                              icon={Image01Icon}
+                              className="size-5 text-primary"
+                            />
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium">
+                              Upload clipboard image
+                            </p>
+                            <p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">
+                              Copy an image or screenshot, then let LAN Drop
+                              read it from the browser clipboard.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                      <Button
+                        className="h-11 w-full text-sm"
+                        type="button"
+                        disabled={uploadSubmitting}
+                        onClick={uploadClipboardImage}
+                      >
+                        <AppIcon icon={ClipboardCopyIcon} />
+                        {uploadSubmitting
+                          ? "Uploading..."
+                          : "Upload image from clipboard"}
                       </Button>
                     </div>
-                  </form>
-                ) : devices.length === 0 ? (
-                  <p className="border bg-muted p-3 text-xs leading-5 text-muted-foreground">
-                    Localhost is trusted automatically. Open the LAN URL and
-                    pair this browser if you want a named device.
-                  </p>
-                ) : (
-                  <p className="text-xs leading-5 text-muted-foreground">
-                    Localhost is auto-trusted. Rename from the paired LAN
-                    browser.
-                  </p>
-                )}
+                  ) : null}
+                </div>
+              </DialogContent>
+            </Dialog>
 
-                <ScrollArea className="max-h-[50svh]">
-                  <div className="grid gap-2 pr-3">
+            <Dialog>
+              <DialogTrigger
+                render={
+                  <Button
+                    aria-label="Devices"
+                    className="size-9"
+                    title="Devices"
+                    type="button"
+                    variant="outline"
+                  />
+                }
+              >
+                <AppIcon icon={ComputerPhoneSyncIcon} />
+                <span className="sr-only">Devices</span>
+              </DialogTrigger>
+              <DialogContent className="sm:max-w-xl">
+                <DialogHeader>
+                  <DialogTitle>Trusted browsers</DialogTitle>
+                  <DialogDescription>
+                    Rename this browser or revoke paired devices.
+                  </DialogDescription>
+                </DialogHeader>
+
+                <div className="grid gap-4">
+                  {currentDeviceId ? (
+                    <form className="grid gap-2" onSubmit={submitDeviceName}>
+                      <Label
+                        className="tracking-[0.2em] text-muted-foreground uppercase"
+                        htmlFor="device-name"
+                      >
+                        This device
+                      </Label>
+                      <div className="flex gap-2">
+                        <Input
+                          className="min-w-0 bg-background/80"
+                          id="device-name"
+                          value={deviceName}
+                          onChange={(event) =>
+                            setDeviceName(event.target.value)
+                          }
+                        />
+                        <Button
+                          className="shrink-0"
+                          type="submit"
+                          disabled={deviceSaving}
+                        >
+                          {deviceSaving ? "Saving..." : "Save"}
+                        </Button>
+                      </div>
+                    </form>
+                  ) : devices.length === 0 ? (
+                    <p className="border bg-muted p-3 text-xs leading-5 text-muted-foreground">
+                      Localhost is trusted automatically. Open the LAN URL and
+                      pair this browser if you want a named device.
+                    </p>
+                  ) : (
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      Localhost is auto-trusted. Rename from the paired LAN
+                      browser.
+                    </p>
+                  )}
+
+                  <div className="grid gap-2">
                     {devices.map((device) => (
                       <article
-                        className="grid grid-cols-[1fr_auto] items-center gap-3 border bg-background/70 p-3"
+                        className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border bg-background/70 p-3"
                         key={device.id}
                       >
                         <div className="min-w-0">
@@ -1265,7 +1285,6 @@ export function App() {
                             {device.name}
                           </div>
                           <div className="mt-1 truncate text-xs text-muted-foreground">
-                            Paired{" "}
                             {new Date(device.created_at).toLocaleString()}
                           </div>
                         </div>
@@ -1273,22 +1292,23 @@ export function App() {
                           {device.id === currentDeviceId ? (
                             <Badge variant="default">
                               <AppIcon icon={CheckmarkCircle02Icon} />
-                              This
+                              <span className="sr-only">This device</span>
                             </Badge>
                           ) : (
                             <Badge variant="outline">
                               <AppIcon icon={Shield01Icon} />
-                              Trusted
+                              <span className="sr-only">Trusted</span>
                             </Badge>
                           )}
                           <Button
-                            size="xs"
+                            aria-label={`Revoke ${device.name}`}
+                            size="icon-xs"
                             type="button"
                             variant="destructive"
                             disabled={revokingDeviceId === device.id}
                             onClick={() => revokeDevice(device)}
                           >
-                            {revokingDeviceId === device.id ? "..." : "Revoke"}
+                            <AppIcon icon={Delete02Icon} />
                           </Button>
                         </div>
                       </article>
@@ -1300,351 +1320,327 @@ export function App() {
                       </div>
                     ) : null}
                   </div>
-                </ScrollArea>
-              </div>
-
-              <DialogFooter showCloseButton />
-            </DialogContent>
-          </Dialog>
-
-          <Dialog>
-            <DialogTrigger
-              render={
-                <Button
-                  aria-label="Connect phone"
-                  className="h-9 px-3 text-xs"
-                  type="button"
-                  variant="default"
-                />
-              }
-            >
-              <AppIcon icon={QrCodeScanIcon} />
-              Connect
-            </DialogTrigger>
-            <DialogContent className="sm:max-w-md">
-              <DialogHeader>
-                <DialogTitle>Connect phone</DialogTitle>
-                <DialogDescription>
-                  Scan this QR code from your phone on the same Wi-Fi.
-                </DialogDescription>
-              </DialogHeader>
-
-              <div className="grid gap-4">
-                <div className="mx-auto border bg-white p-4">
-                  {qrDataUrl ? (
-                    <img
-                      alt={`QR code for ${connectUrl}`}
-                      className="size-64"
-                      src={qrDataUrl}
-                    />
-                  ) : (
-                    <div className="grid size-64 place-items-center text-xs text-black">
-                      Generating QR...
-                    </div>
-                  )}
                 </div>
 
-                <a
-                  className="border bg-muted px-3 py-2 text-xs break-all text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-                  href={connectUrl}
-                >
-                  {connectUrl || "Loading LAN address..."}
-                </a>
-              </div>
+                <DialogFooter showCloseButton />
+              </DialogContent>
+            </Dialog>
 
-              <DialogFooter showCloseButton />
-            </DialogContent>
-          </Dialog>
+            <Dialog>
+              <DialogTrigger
+                render={
+                  <Button
+                    aria-label="Connect phone"
+                    className="size-9"
+                    title="Connect phone"
+                    type="button"
+                    variant="default"
+                  />
+                }
+              >
+                <AppIcon icon={QrCodeScanIcon} />
+                <span className="sr-only">Connect phone</span>
+              </DialogTrigger>
+              <DialogContent className="sm:max-w-md">
+                <DialogHeader>
+                  <DialogTitle>Connect phone</DialogTitle>
+                  <DialogDescription>
+                    Scan this QR code from your phone on the same Wi-Fi.
+                  </DialogDescription>
+                </DialogHeader>
+
+                <div className="grid gap-4">
+                  <div className="mx-auto border bg-white p-4">
+                    {qrDataUrl ? (
+                      <img
+                        alt={`QR code for ${connectUrl}`}
+                        className="size-64"
+                        src={qrDataUrl}
+                      />
+                    ) : (
+                      <div className="grid size-64 place-items-center text-xs text-black">
+                        Generating QR...
+                      </div>
+                    )}
+                  </div>
+
+                  <a
+                    className="border bg-muted px-3 py-2 text-xs break-all text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+                    href={connectUrl}
+                  >
+                    {connectUrl || "Loading LAN address..."}
+                  </a>
+                </div>
+
+                <DialogFooter showCloseButton />
+              </DialogContent>
+            </Dialog>
+          </div>
         </div>
       </div>
 
-      <Card className="mx-auto max-w-7xl border-border/80 bg-card shadow-sm">
-        <CardHeader className="gap-3 p-3 sm:p-4">
-          <div className="min-w-0">
-            <CardTitle className="truncate text-xl font-semibold">
-              {status}
-            </CardTitle>
-          </div>
-          <CardAction>
-            <Button
-              variant="outline"
-              size="sm"
-              render={
-                <a href="/api/items">
-                  <AppIcon icon={File02Icon} />
-                  JSON
-                </a>
-              }
-            />
-          </CardAction>
-        </CardHeader>
+      <div className={appChrome.content}>
+        {activeView.kind === "home" ? (
+          <HomeView
+            itemCounts={itemCounts}
+            items={visibleItems}
+            inboxFilter={inboxFilter}
+            removingItemId={removingItemId}
+            sortKey={sortKey}
+            status={status}
+            onChangeFilter={setInboxFilter}
+            onChangeSort={setSortKey}
+            onOpenItem={openItem}
+            onRemoveItem={removeItem}
+          />
+        ) : null}
 
-        <CardContent className="grid gap-3 p-3 pt-0 sm:p-4 sm:pt-0">
-          <div className="flex flex-col gap-2 border bg-muted/30 p-2 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex flex-wrap gap-1.5">
-              {inboxFilters.map((filter) => (
-                <Button
-                  key={filter.key}
-                  size="sm"
-                  type="button"
-                  variant={inboxFilter === filter.key ? "default" : "outline"}
-                  className="h-7"
-                  onClick={() => setInboxFilter(filter.key)}
-                >
-                  <AppIcon icon={filter.icon} />
-                  {filter.label}
-                  <span className="text-muted-foreground">
-                    {numberFormat.format(itemCounts[filter.key])}
-                  </span>
-                </Button>
-              ))}
-            </div>
-            <label className="flex items-center gap-2 text-xs text-muted-foreground">
-              <AppIcon icon={Sorting01Icon} />
-              Sort
-              <select
-                className="h-8 border bg-background px-2 text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                value={sortKey}
-                onChange={(event) => setSortKey(event.target.value as SortKey)}
-              >
-                {Object.entries(sortLabels).map(([key, label]) => (
-                  <option key={key} value={key}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
+        {activeView.kind === "folder" ? (
+          <FolderView
+            item={activeView.item}
+            path={activeView.path}
+            player={player}
+            onBack={() => navigate({ kind: "home" })}
+            onOpenEntry={(entry) =>
+              navigate({
+                kind: "folder-entry",
+                folder: activeView.item,
+                entry,
+              })
+            }
+            onPathChange={(path) =>
+              navigate({ kind: "folder", item: activeView.item, path })
+            }
+            onSetPlayer={(nextPlayer) => setPlayer(nextPlayer)}
+          />
+        ) : null}
 
-          <ScrollArea className="h-[calc(100svh-11.5rem)] min-h-[34rem]">
-            <div className="grid gap-1.5 pr-3">
-              {visibleItems.map((item) => (
-                <article
-                  className="grid grid-cols-[auto_1fr] gap-3 border bg-background/70 p-2.5 lg:grid-cols-[auto_1fr_auto] lg:items-center"
-                  key={item.id}
-                >
-                  <div className="flex size-9 items-center justify-center border bg-muted">
-                    <AppIcon icon={iconForItem(item)} />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex min-w-0 flex-wrap items-center gap-2">
-                      <h2 className="truncate text-sm font-semibold">
-                        {item.name}
-                      </h2>
-                      <Badge
-                        variant={item.kind === "paste" ? "default" : "outline"}
-                      >
-                        {labelForItem(item)}
-                      </Badge>
-                    </div>
-                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                      <span>
-                        {isFolderItem(item)
-                          ? "Served folder"
-                          : `${numberFormat.format(item.size)} bytes`}
-                      </span>
-                      <span>{item.mime_type ?? "text/plain"}</span>
-                      <span>{new Date(item.created_at).toLocaleString()}</span>
-                    </div>
-                  </div>
-                  <div className="col-span-2 flex gap-1.5 lg:col-span-1 lg:justify-end">
-                    <Button
-                      variant="ghost"
-                      size="xs"
-                      type="button"
-                      onClick={() => openPreview(item)}
-                    >
-                      <AppIcon icon={Search01Icon} />
-                      Open
-                    </Button>
-                    {!isFolderItem(item) ? (
-                      <Button
-                        variant="outline"
-                        size="xs"
-                        render={
-                          <a href={`/api/items/${item.id}/download`}>
-                            <AppIcon icon={Download04Icon} />
-                            Save
-                          </a>
-                        }
-                      />
-                    ) : null}
-                    <Button
-                      variant="outline"
-                      size="xs"
-                      type="button"
-                      disabled={removingItemId === item.id}
-                      onClick={() => removeItem(item)}
-                    >
-                      <AppIcon
-                        icon={
-                          removingItemId === item.id
-                            ? Loading03Icon
-                            : Delete02Icon
-                        }
-                        className={
-                          removingItemId === item.id ? "animate-spin" : ""
-                        }
-                      />
-                      Unshare
-                    </Button>
-                  </div>
-                </article>
-              ))}
+        {activeView.kind === "item" ? (
+          <ItemView
+            item={activeView.item}
+            copyStatus={copyStatus}
+            onBack={() => navigate({ kind: "home" })}
+            onCopyStatusChange={setCopyStatus}
+          />
+        ) : null}
 
-              {visibleItems.length === 0 ? (
-                <div className="grid min-h-64 place-items-center border bg-muted/40 text-center">
-                  <div>
-                    <AppIcon
-                      icon={InboxIcon}
-                      className="mx-auto mb-3 size-8 text-muted-foreground"
-                    />
-                    <p className="text-sm font-medium">No matching drops</p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      Change the category filter or add a new drop.
-                    </p>
-                  </div>
-                </div>
-              ) : null}
-            </div>
-          </ScrollArea>
-        </CardContent>
-      </Card>
-      <Dialog
-        open={preview.status !== "idle"}
-        onOpenChange={(open) => {
-          if (!open) {
-            setPreview((current) => {
-              if (current.status === "ready" && current.url) {
-                URL.revokeObjectURL(current.url)
-              }
+        {activeView.kind === "folder-entry" ? (
+          <FolderEntryView
+            entry={activeView.entry}
+            folder={activeView.folder}
+            onBack={() =>
+              navigate({
+                kind: "folder",
+                item: activeView.folder,
+                path: parentFolderPath(activeView.entry.path),
+              })
+            }
+          />
+        ) : null}
+      </div>
 
-              return { status: "idle" }
-            })
+      {player ? (
+        <StickyPlayer
+          player={player}
+          onClose={() => setPlayer(null)}
+          onSelectIndex={(currentIndex) =>
+            setPlayer((current) =>
+              current ? { ...current, currentIndex } : current
+            )
           }
-        }}
-      >
-        <DialogContent className="max-h-[calc(100svh-2rem)] w-[calc(100vw-2rem)] max-w-[calc(100vw-2rem)] overflow-hidden sm:max-w-5xl">
-          <DialogHeader>
-            <DialogTitle>
-              {preview.status === "idle" ? "Preview" : preview.item.name}
-            </DialogTitle>
-            <DialogDescription>
-              {preview.status === "idle"
-                ? null
-                : isFolderItem(preview.item)
-                  ? "Served folder"
-                  : `${numberFormat.format(preview.item.size)} bytes`}
-            </DialogDescription>
-          </DialogHeader>
-
-          <PreviewBody preview={preview} />
-
-          {preview.status !== "idle" ? (
-            <DialogFooter showCloseButton>
-              {preview.status === "ready" &&
-              typeof preview.text === "string" ? (
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={copyPreviewText}
-                >
-                  <AppIcon icon={ClipboardCopyIcon} />
-                  {copyStatus}
-                </Button>
-              ) : null}
-              {!isFolderItem(preview.item) ? (
-                <Button
-                  variant="outline"
-                  render={
-                    <a href={`/api/items/${preview.item.id}/download`}>
-                      <AppIcon icon={Download04Icon} />
-                      Save
-                    </a>
-                  }
-                />
-              ) : null}
-            </DialogFooter>
-          ) : null}
-        </DialogContent>
-      </Dialog>
+        />
+      ) : null}
     </main>
   )
 }
 
-function PreviewBody({ preview }: { preview: Preview }) {
-  if (preview.status === "idle") {
-    return null
-  }
-
-  if (preview.status === "loading") {
-    return (
-      <div className="grid min-h-64 place-items-center border bg-muted text-xs text-muted-foreground">
-        <div className="flex items-center gap-2">
-          <AppIcon icon={Loading03Icon} className="animate-spin" />
-          Loading preview...
+function HomeView({
+  inboxFilter,
+  itemCounts,
+  items,
+  removingItemId,
+  sortKey,
+  status,
+  onChangeFilter,
+  onChangeSort,
+  onOpenItem,
+  onRemoveItem,
+}: {
+  inboxFilter: InboxFilter
+  itemCounts: Record<InboxFilter, number>
+  items: Item[]
+  removingItemId: string | null
+  sortKey: SortKey
+  status: string
+  onChangeFilter: (filter: InboxFilter) => void
+  onChangeSort: (sort: SortKey) => void
+  onOpenItem: (item: Item) => void
+  onRemoveItem: (item: Item) => void
+}) {
+  return (
+    <section className="grid gap-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="truncate text-xl font-semibold">Library</h2>
+          <p className="truncate text-xs text-muted-foreground">{status}</p>
         </div>
-      </div>
-    )
-  }
-
-  if (preview.status === "error") {
-    return (
-      <div className="border bg-muted p-4 text-xs text-muted-foreground">
-        {preview.message}
-      </div>
-    )
-  }
-
-  if (isFolderItem(preview.item)) {
-    return <FolderPreview item={preview.item} />
-  }
-
-  if (preview.url && isImagePreview(preview.item)) {
-    return (
-      <div className="max-h-[min(70svh,48rem)] max-w-full overflow-auto border bg-muted p-2">
-        <img
-          alt={preview.item.name}
-          className="mx-auto max-h-[64svh] max-w-full object-contain"
-          src={preview.url}
+        <Button
+          variant="outline"
+          size="icon-sm"
+          aria-label="Open JSON"
+          title="Open JSON"
+          render={
+            <a href="/api/items">
+              <AppIcon icon={File02Icon} />
+              <span className="sr-only">JSON</span>
+            </a>
+          }
         />
       </div>
-    )
-  }
 
-  if (preview.url && isAudioPreview(preview.item)) {
-    return <AudioPlayer name={preview.item.name} src={preview.url} />
-  }
-
-  if (typeof preview.text === "string" && isTextPreview(preview.item)) {
-    return (
-      <div className="max-h-[min(64svh,44rem)] max-w-full overflow-auto border bg-muted">
-        <pre className="min-w-max p-4 font-mono text-xs leading-5">
-          {preview.text}
-        </pre>
+      <div className="flex flex-col gap-2 border bg-muted/30 p-2 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex flex-wrap gap-1.5">
+          {inboxFilters.map((filter) => (
+            <Button
+              key={filter.key}
+              aria-label={`${filter.label}: ${numberFormat.format(itemCounts[filter.key])}`}
+              title={`${filter.label}: ${numberFormat.format(itemCounts[filter.key])}`}
+              size="icon-sm"
+              type="button"
+              variant={inboxFilter === filter.key ? "default" : "outline"}
+              onClick={() => onChangeFilter(filter.key)}
+            >
+              <AppIcon icon={filter.icon} />
+              <span className="sr-only">{filter.label}</span>
+            </Button>
+          ))}
+        </div>
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <AppIcon icon={Sorting01Icon} />
+          Sort
+          <select
+            className="h-8 border bg-background px-2 text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            value={sortKey}
+            onChange={(event) => onChangeSort(event.target.value as SortKey)}
+          >
+            {Object.entries(sortLabels).map(([key, label]) => (
+              <option key={key} value={key}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
-    )
-  }
 
-  return (
-    <div className="border bg-muted p-4 text-xs text-muted-foreground">
-      No inline preview for this file type. Use Save to download it.
-    </div>
+      <div className="grid gap-2">
+        {items.map((item) => (
+          <article
+            className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] gap-3 border bg-card/80 p-3"
+            key={item.id}
+          >
+            <div className="flex size-9 items-center justify-center border bg-muted">
+              <AppIcon icon={iconForItem(item)} />
+            </div>
+            <div className="min-w-0">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <h2 className="truncate text-sm font-semibold">{item.name}</h2>
+                <Badge variant={item.kind === "folder" ? "default" : "outline"}>
+                  {isFolderItem(item) ? "Collection" : labelForItem(item)}
+                </Badge>
+              </div>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                <span>
+                  {isFolderItem(item)
+                    ? "Collection"
+                    : `${numberFormat.format(item.size)} bytes`}
+                </span>
+                <span>{item.mime_type ?? "text/plain"}</span>
+                <span>{new Date(item.created_at).toLocaleString()}</span>
+              </div>
+            </div>
+            <div className="flex gap-1.5 justify-self-end">
+              <Button
+                aria-label={`Open ${item.name}`}
+                variant="ghost"
+                size="icon-xs"
+                type="button"
+                title="Open"
+                onClick={() => onOpenItem(item)}
+              >
+                <AppIcon icon={Search01Icon} />
+              </Button>
+              {!isFolderItem(item) ? (
+                <Button
+                  aria-label={`Save ${item.name}`}
+                  variant="outline"
+                  size="icon-xs"
+                  title="Save"
+                  render={
+                    <a href={`/api/items/${item.id}/download`}>
+                      <AppIcon icon={Download04Icon} />
+                    </a>
+                  }
+                />
+              ) : null}
+              <Button
+                aria-label={`Unshare ${item.name}`}
+                variant="outline"
+                size="icon-xs"
+                type="button"
+                title="Unshare"
+                disabled={removingItemId === item.id}
+                onClick={() => onRemoveItem(item)}
+              >
+                <AppIcon
+                  icon={
+                    removingItemId === item.id ? Loading03Icon : Delete02Icon
+                  }
+                  className={removingItemId === item.id ? "animate-spin" : ""}
+                />
+              </Button>
+            </div>
+          </article>
+        ))}
+
+        {items.length === 0 ? (
+          <div className="grid min-h-64 place-items-center border bg-muted/40 text-center">
+            <AppIcon
+              icon={InboxIcon}
+              className="size-8 text-muted-foreground"
+            />
+          </div>
+        ) : null}
+      </div>
+    </section>
   )
 }
 
-function FolderPreview({ item }: { item: Item }) {
-  const [folderPath, setFolderPath] = useState("")
+function FolderView({
+  item,
+  path,
+  player,
+  onBack,
+  onOpenEntry,
+  onPathChange,
+  onSetPlayer,
+}: {
+  item: Item
+  path: string
+  player: PlayerState | null
+  onBack: () => void
+  onOpenEntry: (entry: FolderEntry) => void
+  onPathChange: (path: string) => void
+  onSetPlayer: (player: PlayerState) => void
+}) {
   const [entries, setEntries] = useState<FolderEntry[]>([])
+  const [audioEntries, setAudioEntries] = useState<FolderEntry[]>([])
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading")
   const [message, setMessage] = useState("")
-  const [selected, setSelected] = useState<FolderEntry | null>(null)
-  const [textPreview, setTextPreview] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
 
-    fetch(folderListUrl(item.id, item.created_at, folderPath), {
+    fetch(folderListUrl(item.id, item.created_at, path), {
       cache: "no-store",
     })
       .then(throwIfNotOk)
@@ -1659,7 +1655,7 @@ function FolderPreview({ item }: { item: Item }) {
         if (!cancelled) {
           setStatus("error")
           setMessage(
-            error instanceof Error ? error.message : "Could not load folder"
+            error instanceof Error ? error.message : "Could not load collection"
           )
         }
       })
@@ -1667,311 +1663,819 @@ function FolderPreview({ item }: { item: Item }) {
     return () => {
       cancelled = true
     }
-  }, [folderPath, item.created_at, item.id])
+  }, [item.created_at, item.id, path])
 
-  const changeFolder = (path: string) => {
-    setStatus("loading")
-    setSelected(null)
-    setTextPreview(null)
-    setFolderPath(path)
-  }
+  useEffect(() => {
+    let cancelled = false
 
-  const openEntry = (entry: FolderEntry) => {
-    if (entry.kind === "folder") {
-      changeFolder(entry.path)
+    fetch(folderAudioUrl(item.id, item.created_at), {
+      cache: "no-store",
+    })
+      .then(throwIfNotOk)
+      .then((response) => response.json() as Promise<FolderAudioResponse>)
+      .then((payload) => {
+        if (!cancelled) {
+          setAudioEntries(payload.entries)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAudioEntries([])
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [item.created_at, item.id])
+
+  const audioSources = useMemo(
+    () =>
+      audioEntries.map((entry) => ({
+        id: entry.path,
+        name: entry.path,
+        src: folderFileUrl(item.id, item.created_at, entry.path, "open"),
+        downloadUrl: folderFileUrl(
+          item.id,
+          item.created_at,
+          entry.path,
+          "download"
+        ),
+      })),
+    [audioEntries, item.created_at, item.id]
+  )
+
+  useEffect(() => {
+    if (audioSources.length === 0 || player?.contextId === item.id) {
       return
     }
 
-    setSelected(entry)
-    setTextPreview(null)
+    onSetPlayer({
+      contextId: item.id,
+      queue: audioSources,
+      currentIndex: bestResumeIndex(audioSources),
+    })
+  }, [audioSources, item.id, onSetPlayer, player?.contextId])
 
-    if (isTextLike(entry)) {
-      fetch(folderFileUrl(item.id, item.created_at, entry.path, "open"), {
-        cache: "no-store",
-      })
-        .then(throwIfNotOk)
-        .then((response) => response.text())
-        .then(setTextPreview)
-        .catch((error: unknown) => {
-          toast.error("Could not preview file", {
-            description:
-              error instanceof Error ? error.message : "Preview failed",
-          })
-        })
+  const openEntry = (entry: FolderEntry) => {
+    if (entry.kind === "folder") {
+      onPathChange(entry.path)
+      return
     }
+
+    if (isAudioLike(entry)) {
+      onSetPlayer({
+        contextId: item.id,
+        queue: audioSources,
+        currentIndex: Math.max(
+          0,
+          audioSources.findIndex((source) => source.id === entry.path)
+        ),
+      })
+      return
+    }
+
+    onOpenEntry(entry)
   }
 
-  const parentPath = folderPath.split("/").slice(0, -1).join("/")
-
   if (status === "loading") {
-    return (
-      <div className="grid min-h-64 place-items-center border bg-muted text-xs text-muted-foreground">
-        <div className="flex items-center gap-2">
-          <AppIcon icon={Loading03Icon} className="animate-spin" />
-          Loading folder...
-        </div>
-      </div>
-    )
+    return <LoadingPanel label="Loading collection..." />
   }
 
   if (status === "error") {
-    return (
-      <div className="border bg-muted p-4 text-xs text-muted-foreground">
-        {message}
-      </div>
-    )
+    return <ErrorPanel message={message} />
   }
 
   return (
-    <div className="grid max-h-[min(70svh,48rem)] grid-rows-[auto_1fr] overflow-hidden border bg-background">
-      <div className="flex min-h-11 flex-wrap items-center justify-between gap-2 border-b bg-muted/60 px-3 py-2">
+    <section className="grid gap-3">
+      <div className="flex items-center gap-2">
+        <Button
+          aria-label="Back to library"
+          title="Back"
+          type="button"
+          variant="outline"
+          size="icon-sm"
+          onClick={onBack}
+        >
+          <AppIcon icon={PreviousIcon} />
+        </Button>
+        <div className="min-w-0">
+          <h2 className="truncate text-xl font-semibold">{item.name}</h2>
+          <p className="truncate text-xs text-muted-foreground">Collection</p>
+        </div>
+      </div>
+
+      {audioSources.length > 0 ? (
+        <div className="border bg-muted/30 p-3 text-xs text-muted-foreground">
+          {player?.contextId === item.id
+            ? "Continue listening"
+            : "Ready to play"}
+        </div>
+      ) : null}
+
+      <div className="flex min-h-11 flex-wrap items-center justify-between gap-2 border bg-muted/60 px-3 py-2">
         <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
           <AppIcon icon={Folder01Icon} />
-          <span className="truncate font-mono">{folderPath || "/"}</span>
+          <span className="truncate font-mono">{path || "/"}</span>
         </div>
-        {folderPath ? (
+        {path ? (
           <Button
             type="button"
             variant="outline"
             size="xs"
-            onClick={() => changeFolder(parentPath)}
+            onClick={() => onPathChange(parentFolderPath(path))}
           >
             Up
           </Button>
         ) : null}
       </div>
-      <div className="grid min-h-0 lg:grid-cols-[minmax(18rem,24rem)_1fr]">
-        <div className="min-h-56 overflow-auto border-r">
-          {entries.map((entry) => (
-            <button
-              className={cn(
-                "grid w-full grid-cols-[auto_1fr_auto] items-center gap-2 border-b px-3 py-2 text-left text-sm hover:bg-muted",
-                selected?.path === entry.path && "bg-muted"
-              )}
-              key={entry.path}
-              type="button"
-              onClick={() => openEntry(entry)}
-            >
-              <AppIcon
-                icon={
-                  entry.kind === "folder" ? Folder01Icon : iconForFile(entry)
-                }
-              />
-              <span className="min-w-0 truncate">{entry.name}</span>
-              <span className="text-xs text-muted-foreground">
-                {entry.kind === "folder"
-                  ? "Folder"
-                  : numberFormat.format(entry.size)}
-              </span>
-            </button>
-          ))}
-          {entries.length === 0 ? (
-            <div className="p-4 text-xs text-muted-foreground">
-              This folder is empty.
-            </div>
-          ) : null}
-        </div>
-        <FolderFilePreview
-          entry={selected}
-          item={item}
-          textPreview={textPreview}
-        />
+
+      <div className="grid gap-2">
+        {entries.map((entry) => (
+          <button
+            className="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 border bg-card/80 px-3 py-3 text-left text-sm hover:bg-muted"
+            key={entry.path}
+            type="button"
+            onClick={() => openEntry(entry)}
+          >
+            <AppIcon
+              icon={entry.kind === "folder" ? Folder01Icon : iconForFile(entry)}
+            />
+            <span className="min-w-0 truncate">{entry.name}</span>
+            <span className="hidden max-w-20 truncate text-right text-xs text-muted-foreground sm:block">
+              {entry.kind === "folder"
+                ? "Collection"
+                : numberFormat.format(entry.size)}
+            </span>
+          </button>
+        ))}
+        {entries.length === 0 ? (
+          <div className="p-4 text-xs text-muted-foreground">
+            This collection is empty.
+          </div>
+        ) : null}
       </div>
-    </div>
+    </section>
   )
 }
 
-function FolderFilePreview({
-  entry,
+function ItemView({
   item,
-  textPreview,
+  copyStatus,
+  onBack,
+  onCopyStatusChange,
 }: {
-  entry: FolderEntry | null
   item: Item
-  textPreview: string | null
+  copyStatus: string
+  onBack: () => void
+  onCopyStatusChange: (status: string) => void
 }) {
-  if (!entry) {
-    return (
-      <div className="grid min-h-64 place-items-center bg-muted/30 p-4 text-xs text-muted-foreground">
-        Select a file to preview or download.
-      </div>
-    )
+  const [text, setText] = useState<string | null>(null)
+  const [status, setStatus] = useState<"loading" | "ready" | "error">(
+    isTextPreview(item) ? "loading" : "ready"
+  )
+  const [message, setMessage] = useState("")
+  const openUrl = `/api/items/${item.id}/open`
+  const downloadUrl = `/api/items/${item.id}/download`
+
+  useEffect(() => {
+    if (!isTextPreview(item)) {
+      return
+    }
+
+    let cancelled = false
+
+    fetch(openUrl, { cache: "no-store" })
+      .then(throwIfNotOk)
+      .then((response) => response.text())
+      .then((nextText) => {
+        if (!cancelled) {
+          setText(nextText)
+          setStatus("ready")
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setStatus("error")
+          setMessage(error instanceof Error ? error.message : "Could not load")
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [item, openUrl])
+
+  const copyText = () => {
+    if (text === null) {
+      return
+    }
+
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        onCopyStatusChange("Copied")
+        window.setTimeout(() => onCopyStatusChange("Copy"), 1200)
+      })
+      .catch(() => {
+        onCopyStatusChange("Copy failed")
+        window.setTimeout(() => onCopyStatusChange("Copy"), 1200)
+      })
   }
 
-  const openUrl = folderFileUrl(item.id, item.created_at, entry.path, "open")
+  return (
+    <DocumentShell
+      title={item.name}
+      detail={`${numberFormat.format(item.size)} bytes`}
+      downloadUrl={downloadUrl}
+      onBack={onBack}
+    >
+      {status === "loading" ? <LoadingPanel label="Loading..." /> : null}
+      {status === "error" ? <ErrorPanel message={message} /> : null}
+      {status === "ready" && isImagePreview(item) ? (
+        <img
+          alt={item.name}
+          className="mx-auto max-h-[calc(100svh-10rem)] max-w-full object-contain"
+          src={openUrl}
+        />
+      ) : null}
+      {status === "ready" && text !== null ? (
+        <div className="grid gap-2">
+          <Button
+            className="w-fit"
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={copyText}
+          >
+            <AppIcon icon={ClipboardCopyIcon} />
+            {copyStatus}
+          </Button>
+          <pre className="overflow-x-auto border bg-muted p-4 font-mono text-xs leading-5">
+            {text}
+          </pre>
+        </div>
+      ) : null}
+      {status === "ready" && !isImagePreview(item) && text === null ? (
+        <ErrorPanel message="No inline view for this file type." />
+      ) : null}
+    </DocumentShell>
+  )
+}
+
+function FolderEntryView({
+  entry,
+  folder,
+  onBack,
+}: {
+  entry: FolderEntry
+  folder: Item
+  onBack: () => void
+}) {
+  const [text, setText] = useState<string | null>(null)
+  const [status, setStatus] = useState<"loading" | "ready" | "error">(
+    isTextLike(entry) ? "loading" : "ready"
+  )
+  const [message, setMessage] = useState("")
+  const openUrl = folderFileUrl(
+    folder.id,
+    folder.created_at,
+    entry.path,
+    "open"
+  )
   const downloadUrl = folderFileUrl(
-    item.id,
-    item.created_at,
+    folder.id,
+    folder.created_at,
     entry.path,
     "download"
   )
 
+  useEffect(() => {
+    if (!isTextLike(entry)) {
+      return
+    }
+
+    let cancelled = false
+
+    fetch(openUrl, { cache: "no-store" })
+      .then(throwIfNotOk)
+      .then((response) => response.text())
+      .then((nextText) => {
+        if (!cancelled) {
+          setText(nextText)
+          setStatus("ready")
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setStatus("error")
+          setMessage(error instanceof Error ? error.message : "Could not load")
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [entry, openUrl])
+
   return (
-    <div className="min-h-0 overflow-auto bg-muted/30 p-3">
-      <div className="mb-3 flex min-h-9 flex-wrap items-center justify-between gap-2">
-        <div className="min-w-0">
-          <p className="truncate text-sm font-medium">{entry.name}</p>
-          <p className="text-xs text-muted-foreground">
-            {entry.mime_type ?? "application/octet-stream"}
-          </p>
+    <DocumentShell
+      title={entry.name}
+      detail={entry.mime_type ?? "application/octet-stream"}
+      downloadUrl={downloadUrl}
+      onBack={onBack}
+    >
+      {status === "loading" ? <LoadingPanel label="Loading..." /> : null}
+      {status === "error" ? <ErrorPanel message={message} /> : null}
+      {status === "ready" && isImageLike(entry) ? (
+        <img
+          alt={entry.name}
+          className="mx-auto max-h-[calc(100svh-10rem)] max-w-full object-contain"
+          src={openUrl}
+        />
+      ) : null}
+      {status === "ready" && text !== null ? (
+        <pre className="overflow-x-auto border bg-muted p-4 font-mono text-xs leading-5">
+          {text}
+        </pre>
+      ) : null}
+      {status === "ready" && !isImageLike(entry) && text === null ? (
+        <ErrorPanel message="No inline view for this file type." />
+      ) : null}
+    </DocumentShell>
+  )
+}
+
+function DocumentShell({
+  children,
+  detail,
+  downloadUrl,
+  onBack,
+  title,
+}: {
+  children: React.ReactNode
+  detail: string
+  downloadUrl: string
+  onBack: () => void
+  title: string
+}) {
+  return (
+    <section className="grid gap-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <Button
+            aria-label="Back"
+            title="Back"
+            type="button"
+            variant="outline"
+            size="icon-sm"
+            onClick={onBack}
+          >
+            <AppIcon icon={PreviousIcon} />
+          </Button>
+          <div className="min-w-0">
+            <h2 className="truncate text-lg font-semibold">{title}</h2>
+            <p className="truncate text-xs text-muted-foreground">{detail}</p>
+          </div>
         </div>
         <Button
+          aria-label="Save"
+          title="Save"
           variant="outline"
-          size="xs"
+          size="icon-sm"
           render={
             <a href={downloadUrl}>
               <AppIcon icon={Download04Icon} />
-              Save
             </a>
           }
         />
       </div>
-      {isAudioLike(entry) ? (
-        <AudioPlayer name={entry.name} src={openUrl} />
-      ) : isImageLike(entry) ? (
-        <div className="max-h-[52svh] overflow-auto border bg-muted p-2">
-          <img
-            alt={entry.name}
-            className="mx-auto max-h-[48svh] max-w-full object-contain"
-            src={openUrl}
-          />
-        </div>
-      ) : isTextLike(entry) ? (
-        <div className="max-h-[52svh] overflow-auto border bg-muted">
-          <pre className="min-w-max p-4 font-mono text-xs leading-5">
-            {textPreview ?? "Loading preview..."}
-          </pre>
-        </div>
-      ) : (
-        <div className="border bg-muted p-4 text-xs text-muted-foreground">
-          No inline preview for this file type. Use Save to download it.
-        </div>
-      )}
+      {children}
+    </section>
+  )
+}
+
+function LoadingPanel({ label }: { label: string }) {
+  return (
+    <div className="grid min-h-64 place-items-center border bg-muted text-xs text-muted-foreground">
+      <div className="flex items-center gap-2">
+        <AppIcon icon={Loading03Icon} className="animate-spin" />
+        {label}
+      </div>
     </div>
   )
 }
 
-function AudioPlayer({ name, src }: { name: string; src: string }) {
-  const waveformRef = useRef<HTMLDivElement | null>(null)
-  const wavesurferRef = useRef<WaveSurfer | null>(null)
-  const volumeRef = useRef(1)
+function ErrorPanel({ message }: { message: string }) {
+  return (
+    <div className="border bg-muted p-4 text-xs text-muted-foreground">
+      {message}
+    </div>
+  )
+}
+
+function StickyPlayer({
+  player,
+  onClose,
+  onSelectIndex,
+}: {
+  player: PlayerState
+  onClose: () => void
+  onSelectIndex: (index: number) => void
+}) {
+  return (
+    <div className={playerChrome.bar}>
+      <div className={playerChrome.inner}>
+        <Button
+          aria-label="Close player"
+          className="absolute top-4 right-[var(--landrop-shell-pad)] z-10 sm:right-[var(--landrop-shell-pad-wide)]"
+          title="Close player"
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          onClick={onClose}
+        >
+          <AppIcon icon={Delete02Icon} />
+        </Button>
+        <AudioPlayer
+          compact
+          source={player.queue[player.currentIndex]}
+          queue={player.queue}
+          currentIndex={player.currentIndex}
+          onSelectIndex={onSelectIndex}
+        />
+      </div>
+    </div>
+  )
+}
+
+function AudioPlayer({
+  compact = false,
+  source,
+  queue,
+  currentIndex = -1,
+  onSelectIndex,
+}: {
+  compact?: boolean
+  source?: AudioSource
+  queue?: AudioSource[]
+  currentIndex?: number
+  onSelectIndex?: (index: number) => void
+}) {
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const [cacheStatus, setCacheStatus] = useState<
+    "unsupported" | "checking" | "idle" | "caching" | "cached" | "error"
+  >("caches" in window ? "idle" : "unsupported")
+  const [currentTime, setCurrentTime] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const [playbackRate, setPlaybackRate] = useState(1)
   const [playing, setPlaying] = useState(false)
   const [ready, setReady] = useState(false)
-  const [loadingProgress, setLoadingProgress] = useState(0)
-  const [duration, setDuration] = useState(0)
-  const [currentTime, setCurrentTime] = useState(0)
-  const [volume, setVolume] = useState(1)
 
-  useEffect(() => {
-    const container = waveformRef.current
+  if (!source) {
+    return (
+      <div className="border bg-muted p-4 text-xs text-muted-foreground">
+        No audio selected.
+      </div>
+    )
+  }
 
-    if (!container) {
+  const canGoPrevious = Boolean(queue && currentIndex > 0)
+  const canGoNext = Boolean(
+    queue && currentIndex >= 0 && currentIndex < queue.length - 1
+  )
+  const progressKey = progressStorageKey(source.src)
+
+  const saveProgress = (audio: HTMLAudioElement) => {
+    if (!Number.isFinite(audio.currentTime) || audio.currentTime <= 0) {
       return
     }
 
-    const style = getComputedStyle(document.documentElement)
-    const waveColor = style.getPropertyValue("--muted-foreground").trim()
-    const progressColor = style.getPropertyValue("--primary").trim()
-    const cursorColor = style.getPropertyValue("--foreground").trim()
-    const wavesurfer = WaveSurfer.create({
-      barGap: 2,
-      barRadius: 2,
-      barWidth: 2,
-      cursorColor,
-      cursorWidth: 2,
-      dragToSeek: true,
-      height: 56,
-      normalize: true,
-      progressColor,
-      url: src,
-      waveColor,
-      container,
-    })
+    localStorage.setItem(
+      progressKey,
+      JSON.stringify({
+        currentTime: audio.currentTime,
+        duration: audio.duration,
+        updatedAt: Date.now(),
+      })
+    )
+  }
 
-    wavesurferRef.current = wavesurfer
-    setCurrentTime(0)
-    setDuration(0)
-    setLoadingProgress(0)
-    setPlaying(false)
-    setReady(false)
-    wavesurfer.setVolume(volumeRef.current)
+  const restoreProgress = (audio: HTMLAudioElement) => {
+    const nextDuration = Number.isFinite(audio.duration) ? audio.duration : 0
+    const savedTime = readSavedProgress(progressKey, nextDuration)
 
-    wavesurfer.on("loading", (progress) => setLoadingProgress(progress))
-    wavesurfer.on("ready", (nextDuration) => {
-      setDuration(nextDuration)
-      setReady(true)
-      setLoadingProgress(100)
-    })
-    wavesurfer.on("timeupdate", (nextTime) => setCurrentTime(nextTime))
-    wavesurfer.on("seeking", (nextTime) => setCurrentTime(nextTime))
-    wavesurfer.on("play", () => setPlaying(true))
-    wavesurfer.on("pause", () => setPlaying(false))
-    wavesurfer.on("finish", () => setPlaying(false))
-    wavesurfer.on("error", () => {
-      setPlaying(false)
-      setReady(false)
-      toast.error("Audio playback failed")
-    })
+    audio.playbackRate = playbackRate
+    setDuration(nextDuration)
+    setReady(true)
 
-    return () => {
-      wavesurfer.destroy()
-      if (wavesurferRef.current === wavesurfer) {
-        wavesurferRef.current = null
-      }
+    if (savedTime > 0 && Math.abs(audio.currentTime - savedTime) > 1) {
+      audio.currentTime = savedTime
+      setCurrentTime(savedTime)
     }
-  }, [src])
+
+    updateMediaSession(
+      source.name,
+      togglePlayback,
+      (seconds) => skip(seconds),
+      goPrevious,
+      goNext
+    )
+  }
 
   const togglePlayback = () => {
-    const wavesurfer = wavesurferRef.current
+    const audio = audioRef.current
 
-    if (!wavesurfer) {
+    if (!audio) {
       return
     }
 
-    wavesurfer.playPause().catch(() => {
-      toast.error("Audio playback failed")
-    })
+    if (audio.paused) {
+      audio.play().catch(() => toast.error("Audio playback failed"))
+    } else {
+      audio.pause()
+    }
   }
 
   const skip = (seconds: number) => {
-    const wavesurfer = wavesurferRef.current
+    const audio = audioRef.current
 
-    if (wavesurfer) {
-      wavesurfer.skip(seconds)
+    if (!audio) {
+      return
+    }
+
+    const nextTime = clamp(
+      audio.currentTime + seconds,
+      0,
+      Number.isFinite(audio.duration) ? audio.duration : audio.currentTime
+    )
+
+    audio.currentTime = nextTime
+    setCurrentTime(nextTime)
+    saveProgress(audio)
+  }
+
+  const seekToRatio = (clientX: number, element: HTMLElement) => {
+    const audio = audioRef.current
+
+    if (!audio || !ready || duration <= 0) {
+      return
+    }
+
+    const bounds = element.getBoundingClientRect()
+    const ratio = clamp((clientX - bounds.left) / bounds.width, 0, 1)
+    const nextTime = ratio * duration
+    const wasPlaying = !audio.paused
+
+    audio.currentTime = nextTime
+    setCurrentTime(nextTime)
+    saveProgress(audio)
+
+    if (wasPlaying) {
+      audio.play().catch(() => setPlaying(false))
     }
   }
 
-  const changeVolume = (value: string) => {
-    const nextVolume = Number(value)
-    const wavesurfer = wavesurferRef.current
+  const seekByKeyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const audio = audioRef.current
 
-    volumeRef.current = nextVolume
-
-    if (wavesurfer) {
-      wavesurfer.setVolume(nextVolume)
+    if (!audio || !ready || duration <= 0) {
+      return
     }
 
-    setVolume(nextVolume)
+    if (event.key === "ArrowLeft") {
+      event.preventDefault()
+      skip(-15)
+    }
+
+    if (event.key === "ArrowRight") {
+      event.preventDefault()
+      skip(15)
+    }
+
+    if (event.key === "Home") {
+      event.preventDefault()
+      audio.currentTime = 0
+      setCurrentTime(0)
+      saveProgress(audio)
+    }
+
+    if (event.key === "End") {
+      event.preventDefault()
+      audio.currentTime = duration
+      setCurrentTime(duration)
+      saveProgress(audio)
+    }
   }
+
+  const goPrevious = () => {
+    if (canGoPrevious && onSelectIndex) {
+      onSelectIndex(currentIndex - 1)
+    }
+  }
+
+  const goNext = () => {
+    if (canGoNext && onSelectIndex) {
+      onSelectIndex(currentIndex + 1)
+    }
+  }
+
+  const changePlaybackRate = (value: string) => {
+    const nextRate = Number(value)
+    const audio = audioRef.current
+
+    if (!Number.isFinite(nextRate)) {
+      return
+    }
+
+    if (audio) {
+      audio.playbackRate = nextRate
+    }
+
+    setPlaybackRate(nextRate)
+  }
+
+  const keepOffline = () => {
+    if (!("caches" in window)) {
+      setCacheStatus("unsupported")
+      return
+    }
+
+    setCacheStatus("caching")
+
+    fetch(source.src, { credentials: "include" })
+      .then(throwIfNotOk)
+      .then((response) =>
+        caches
+          .open("landrop-media-v1")
+          .then((cache) => cache.put(source.src, response))
+      )
+      .then(() => {
+        setCacheStatus("cached")
+        toast.success("Saved for offline listening", {
+          description: source.name,
+        })
+      })
+      .catch((error: unknown) => {
+        setCacheStatus("error")
+        toast.error("Could not cache audio", {
+          description:
+            error instanceof Error ? error.message : "Offline save failed",
+        })
+      })
+  }
+
+  const removeOffline = () => {
+    if (!("caches" in window)) {
+      return
+    }
+
+    caches
+      .open("landrop-media-v1")
+      .then((cache) => cache.delete(source.src))
+      .then(() => {
+        setCacheStatus("idle")
+        toast.success("Removed offline copy", {
+          description: source.name,
+        })
+      })
+      .catch(() => {
+        setCacheStatus("error")
+      })
+  }
+
+  const progress =
+    duration > 0 ? clamp((currentTime / duration) * 100, 0, 100) : 0
 
   return (
-    <div className="border bg-muted p-4">
+    <div className={cn(playerChrome.body, !compact && "sm:p-4")}>
+      <audio
+        key={source.src}
+        ref={audioRef}
+        preload="metadata"
+        src={source.src}
+        onDurationChange={(event) => {
+          const audio = event.currentTarget
+          const nextDuration = Number.isFinite(audio.duration)
+            ? audio.duration
+            : 0
+
+          setDuration(nextDuration)
+        }}
+        onEnded={() => {
+          setPlaying(false)
+
+          if (canGoNext && onSelectIndex) {
+            onSelectIndex(currentIndex + 1)
+          }
+        }}
+        onError={() => {
+          setPlaying(false)
+          toast.error("Audio playback failed", {
+            description: "If the server is off, keep this file offline first.",
+          })
+        }}
+        onLoadedMetadata={(event) => restoreProgress(event.currentTarget)}
+        onPause={() => setPlaying(false)}
+        onPlay={(event) => {
+          event.currentTarget.playbackRate = playbackRate
+          setPlaying(true)
+        }}
+        onSeeked={(event) => saveProgress(event.currentTarget)}
+        onTimeUpdate={(event) => {
+          const audio = event.currentTarget
+
+          setCurrentTime(audio.currentTime)
+          saveProgress(audio)
+        }}
+      />
+
       <div className="grid gap-3">
-        <div className="flex items-center gap-3">
+        <div
+          className={cn(
+            "flex min-w-0 items-start justify-between gap-3",
+            compact && "pr-8"
+          )}
+        >
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium">{source.name}</p>
+            <p className="font-mono text-xs text-muted-foreground">
+              {formatDuration(currentTime)} / {formatDuration(duration)}
+            </p>
+          </div>
+          <Badge
+            className={cn("shrink-0", compact && "hidden sm:inline-flex")}
+            variant={cacheStatus === "cached" ? "default" : "outline"}
+          >
+            {cacheStatus === "cached" ? "Offline" : "Stream"}
+          </Badge>
+        </div>
+
+        <div
+          aria-label="Playback position"
+          aria-valuemax={Math.max(duration, 0)}
+          aria-valuemin={0}
+          aria-valuenow={Math.min(currentTime, duration || currentTime)}
+          className={cn(
+            "group relative cursor-pointer touch-none",
+            compact ? "h-6" : "h-8",
+            (!ready || duration <= 0) && "pointer-events-none opacity-50"
+          )}
+          role="slider"
+          tabIndex={ready && duration > 0 ? 0 : -1}
+          onKeyDown={seekByKeyboard}
+          onPointerDown={(event) => {
+            event.currentTarget.setPointerCapture(event.pointerId)
+            seekToRatio(event.clientX, event.currentTarget)
+          }}
+          onPointerMove={(event) => {
+            if (event.buttons === 1) {
+              seekToRatio(event.clientX, event.currentTarget)
+            }
+          }}
+        >
+          <div className="absolute top-1/2 right-0 left-0 h-1 -translate-y-1/2 bg-border" />
+          <div
+            className="absolute top-1/2 left-0 h-1 -translate-y-1/2 bg-primary"
+            style={{ width: `${progress}%` }}
+          />
+          <div
+            className="absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 border bg-primary shadow-sm transition-transform group-hover:scale-110"
+            style={{ left: `${progress}%` }}
+          />
+        </div>
+
+        <div className={playerChrome.controls}>
           <Button
-            aria-label="Skip backward 10 seconds"
+            aria-label="Previous track"
+            className={playerChrome.control}
+            title="Previous track"
+            type="button"
+            variant="outline"
+            size="icon"
+            disabled={!canGoPrevious}
+            onClick={goPrevious}
+          >
+            <AppIcon icon={PreviousIcon} />
+          </Button>
+          <Button
+            aria-label="Skip backward 15 seconds"
+            className={playerChrome.control}
+            title="Skip backward 15 seconds"
             type="button"
             variant="outline"
             size="icon"
             disabled={!ready}
-            onClick={() => skip(-10)}
+            onClick={() => skip(-15)}
           >
-            <AppIcon icon={GoBackward10SecIcon} />
+            <AppIcon icon={GoBackward15SecIcon} />
           </Button>
           <Button
             aria-label={playing ? "Pause" : "Play"}
+            className={playerChrome.control}
+            title={playing ? "Pause" : "Play"}
             type="button"
-            variant="outline"
+            variant="default"
             size="icon"
             disabled={!ready}
             onClick={togglePlayback}
@@ -1979,45 +2483,171 @@ function AudioPlayer({ name, src }: { name: string; src: string }) {
             <AppIcon icon={playing ? PauseIcon : PlayIcon} />
           </Button>
           <Button
-            aria-label="Skip forward 10 seconds"
+            aria-label="Skip forward 30 seconds"
+            className={playerChrome.control}
+            title="Skip forward 30 seconds"
             type="button"
             variant="outline"
             size="icon"
             disabled={!ready}
-            onClick={() => skip(10)}
+            onClick={() => skip(30)}
           >
-            <AppIcon icon={GoForward10SecIcon} />
+            <AppIcon icon={GoForward30SecIcon} />
           </Button>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium">{name}</p>
-            <p className="font-mono text-xs text-muted-foreground">
-              {ready
-                ? `${formatDuration(currentTime)} / ${formatDuration(duration)}`
-                : `Loading waveform ${Math.round(loadingProgress)}%`}
-            </p>
-          </div>
+          <Button
+            aria-label="Next track"
+            className={playerChrome.control}
+            title="Next track"
+            type="button"
+            variant="outline"
+            size="icon"
+            disabled={!canGoNext}
+            onClick={goNext}
+          >
+            <AppIcon icon={NextIcon} />
+          </Button>
         </div>
+
         <div
-          ref={waveformRef}
-          aria-label="Audio waveform"
-          className="min-h-14 cursor-pointer overflow-hidden border bg-background px-2 py-1"
-        />
-        <div className="flex items-center gap-2 text-muted-foreground">
-          <AppIcon icon={VolumeHighIcon} />
-          <input
-            aria-label="Volume"
-            className="h-2 w-28 accent-primary"
-            max="1"
-            min="0"
-            step="0.01"
-            type="range"
-            value={volume}
-            onChange={(event) => changeVolume(event.target.value)}
-          />
+          className={cn(
+            "flex flex-wrap items-center gap-3 text-xs text-muted-foreground",
+            compact && "hidden sm:flex"
+          )}
+        >
+          <label className="flex items-center gap-2">
+            Speed
+            <select
+              className="h-8 border bg-background px-2 text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              value={playbackRate}
+              onChange={(event) => changePlaybackRate(event.target.value)}
+            >
+              {[0.8, 1, 1.15, 1.25, 1.5, 1.75, 2].map((rate) => (
+                <option key={rate} value={rate}>
+                  {rate}x
+                </option>
+              ))}
+            </select>
+          </label>
+          {cacheStatus === "cached" ? (
+            <Button
+              aria-label="Remove offline copy"
+              title="Remove offline copy"
+              type="button"
+              variant="outline"
+              size="icon-xs"
+              onClick={removeOffline}
+            >
+              <AppIcon icon={Delete02Icon} />
+            </Button>
+          ) : (
+            <Button
+              aria-label="Keep offline"
+              title="Keep offline"
+              type="button"
+              variant="outline"
+              size="icon-xs"
+              disabled={
+                cacheStatus === "caching" || cacheStatus === "unsupported"
+              }
+              onClick={keepOffline}
+            >
+              <AppIcon
+                icon={
+                  cacheStatus === "caching" ? Loading03Icon : Download04Icon
+                }
+                className={cacheStatus === "caching" ? "animate-spin" : ""}
+              />
+            </Button>
+          )}
+          {source.downloadUrl ? (
+            <Button
+              aria-label="Save audio file"
+              title="Save audio file"
+              variant="outline"
+              size="icon-xs"
+              render={
+                <a href={source.downloadUrl}>
+                  <AppIcon icon={Download04Icon} />
+                </a>
+              }
+            />
+          ) : null}
         </div>
       </div>
     </div>
   )
+}
+
+function progressStorageKey(src: string) {
+  return `landrop:progress:${src}`
+}
+
+function readSavedProgress(key: string, duration: number) {
+  try {
+    const raw = localStorage.getItem(key)
+
+    if (!raw) {
+      return 0
+    }
+
+    const saved = JSON.parse(raw) as { currentTime?: unknown }
+    const currentTime =
+      typeof saved.currentTime === "number" ? saved.currentTime : 0
+
+    if (!Number.isFinite(currentTime) || currentTime < 5) {
+      return 0
+    }
+
+    if (
+      Number.isFinite(duration) &&
+      duration > 0 &&
+      currentTime > duration - 10
+    ) {
+      return 0
+    }
+
+    return currentTime
+  } catch {
+    return 0
+  }
+}
+
+function updateMediaSession(
+  title: string,
+  togglePlayback: () => void,
+  skip: (seconds: number) => void,
+  goPrevious: () => void,
+  goNext: () => void
+) {
+  if (!("mediaSession" in navigator)) {
+    return
+  }
+
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title,
+    artist: "LAN Drop",
+  })
+
+  const handlers: Array<[MediaSessionAction, MediaSessionActionHandler]> = [
+    ["play", togglePlayback],
+    ["pause", togglePlayback],
+    ["previoustrack", goPrevious],
+    ["nexttrack", goNext],
+    ["seekbackward", () => skip(-15)],
+    ["seekforward", () => skip(30)],
+  ]
+
+  for (const [action, handler] of handlers) {
+    try {
+      navigator.mediaSession.setActionHandler(action, handler)
+    } catch {
+      // Some browsers expose Media Session but not every action.
+    }
+  }
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max)
 }
 
 function AppIcon({
@@ -2135,6 +2765,161 @@ function isTextLike(entry: Pick<FolderEntry, "mime_type" | "name">) {
   )
 }
 
+function readActiveViewFromUrl(items: Item[]): ActiveView | null {
+  const params = new URLSearchParams(window.location.search)
+  const view = params.get("view")
+  const itemId = params.get("id")
+
+  if (!view) {
+    return { kind: "home" }
+  }
+
+  if (!itemId) {
+    return null
+  }
+
+  const item = items.find((candidate) => candidate.id === itemId)
+
+  if (!item) {
+    return null
+  }
+
+  if (view === "collection" && isFolderItem(item)) {
+    return {
+      kind: "folder",
+      item,
+      path: params.get("path") ?? "",
+    }
+  }
+
+  if (view === "item" && !isFolderItem(item)) {
+    return { kind: "item", item }
+  }
+
+  if (view === "file" && isFolderItem(item)) {
+    const path = params.get("path")
+
+    if (!path) {
+      return null
+    }
+
+    return {
+      kind: "folder-entry",
+      folder: item,
+      entry: {
+        kind: "file",
+        mime_type: mimeTypeForName(path),
+        modified_at: null,
+        name: basenameFromPath(path),
+        path,
+        size: 0,
+      },
+    }
+  }
+
+  return null
+}
+
+function writeActiveViewToUrl(view: ActiveView, mode: "push" | "replace") {
+  const url = new URL(window.location.href)
+  const params = url.searchParams
+
+  params.delete("view")
+  params.delete("id")
+  params.delete("path")
+
+  if (view.kind === "folder") {
+    params.set("view", "collection")
+    params.set("id", view.item.id)
+
+    if (view.path) {
+      params.set("path", view.path)
+    }
+  } else if (view.kind === "item") {
+    params.set("view", "item")
+    params.set("id", view.item.id)
+  } else if (view.kind === "folder-entry") {
+    params.set("view", "file")
+    params.set("id", view.folder.id)
+    params.set("path", view.entry.path)
+  }
+
+  const nextUrl = `${url.pathname}${url.search}${url.hash}`
+
+  if (
+    nextUrl ===
+    `${window.location.pathname}${window.location.search}${window.location.hash}`
+  ) {
+    return
+  }
+
+  if (mode === "replace") {
+    window.history.replaceState(null, "", nextUrl)
+  } else {
+    window.history.pushState(null, "", nextUrl)
+  }
+}
+
+function parentFolderPath(path: string) {
+  return path.split("/").slice(0, -1).join("/")
+}
+
+function bestResumeIndex(sources: AudioSource[]) {
+  let bestIndex = 0
+  let bestUpdatedAt = 0
+
+  sources.forEach((source, index) => {
+    try {
+      const raw = localStorage.getItem(progressStorageKey(source.src))
+
+      if (!raw) {
+        return
+      }
+
+      const saved = JSON.parse(raw) as { updatedAt?: unknown }
+      const updatedAt =
+        typeof saved.updatedAt === "number" ? saved.updatedAt : 0
+
+      if (updatedAt > bestUpdatedAt) {
+        bestUpdatedAt = updatedAt
+        bestIndex = index
+      }
+    } catch {
+      // Ignore corrupt local progress entries.
+    }
+  })
+
+  return bestIndex
+}
+
+function basenameFromPath(path: string) {
+  return path.split("/").filter(Boolean).at(-1) ?? path
+}
+
+function mimeTypeForName(name: string) {
+  const lower = name.toLowerCase()
+
+  if (lower.endsWith(".aac")) return "audio/aac"
+  if (lower.endsWith(".flac")) return "audio/flac"
+  if (lower.endsWith(".m4a")) return "audio/mp4"
+  if (lower.endsWith(".mp3")) return "audio/mpeg"
+  if (lower.endsWith(".oga") || lower.endsWith(".ogg")) return "audio/ogg"
+  if (lower.endsWith(".opus")) return "audio/ogg"
+  if (lower.endsWith(".wav")) return "audio/wav"
+  if (lower.endsWith(".webm")) return "audio/webm"
+  if (lower.endsWith(".avif")) return "image/avif"
+  if (lower.endsWith(".gif")) return "image/gif"
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg"
+  if (lower.endsWith(".png")) return "image/png"
+  if (lower.endsWith(".svg")) return "image/svg+xml"
+  if (lower.endsWith(".webp")) return "image/webp"
+  if (lower.endsWith(".json")) return "application/json"
+  if (lower.endsWith(".md")) return "text/markdown; charset=utf-8"
+  if (lower.endsWith(".txt")) return "text/plain; charset=utf-8"
+
+  return "application/octet-stream"
+}
+
 function folderListUrl(itemId: string, itemCreatedAt: number, path: string) {
   const params = new URLSearchParams({
     path,
@@ -2142,6 +2927,14 @@ function folderListUrl(itemId: string, itemCreatedAt: number, path: string) {
   })
 
   return `/api/items/${itemId}/folder?${params.toString()}`
+}
+
+function folderAudioUrl(itemId: string, itemCreatedAt: number) {
+  const params = new URLSearchParams({
+    revision: String(itemCreatedAt),
+  })
+
+  return `/api/items/${itemId}/folder/audio?${params.toString()}`
 }
 
 function folderFileUrl(
@@ -2164,8 +2957,18 @@ function formatDuration(value: number) {
   }
 
   const totalSeconds = Math.floor(value)
+  const hours = Math.floor(totalSeconds / 3600)
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = String(totalSeconds % 60).padStart(2, "0")
+
+  if (hours > 0) {
+    const hourMinutes = String(Math.floor((totalSeconds % 3600) / 60)).padStart(
+      2,
+      "0"
+    )
+
+    return `${hours}:${hourMinutes}:${seconds}`
+  }
 
   return `${minutes}:${seconds}`
 }

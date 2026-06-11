@@ -61,6 +61,14 @@ interface TrustedDeviceRow {
   readonly revoked_at: number | null
 }
 
+interface AudioEntry {
+  readonly name: string
+  readonly path: string
+  readonly mime_type: string
+  readonly size: number
+  readonly modified_at: number | null
+}
+
 type EmbeddedFile = Blob & {
   readonly name?: string
 }
@@ -510,6 +518,30 @@ const handleFolderItems = Effect.gen(function* () {
 })
 const handleOpenFolderFile = serveFolderFile(false)
 const handleDownloadFolderFile = serveFolderFile(true)
+const handleFolderAudio = Effect.gen(function* () {
+  const auth = yield* requireTrustedDevice
+
+  if (auth) {
+    return auth
+  }
+
+  const folder = yield* findFolderItem
+
+  if (!folder.ok) {
+    return folder.response
+  }
+
+  const entries = yield* collectAudioEntries(folder.item.path)
+
+  return yield* HttpServerResponse.json(
+    {
+      entries,
+    },
+    {
+      headers: NO_STORE_HEADERS,
+    }
+  )
+})
 
 const handleAuthStatus = Effect.gen(function* () {
   const trusted = yield* isTrustedRequest
@@ -779,6 +811,7 @@ const apiApp = pipe(
   HttpRouter.get("/api/items/:id/open", handleOpenItem),
   HttpRouter.get("/api/items/:id/download", handleDownloadItem),
   HttpRouter.get("/api/items/:id/folder", handleFolderItems),
+  HttpRouter.get("/api/items/:id/folder/audio", handleFolderAudio),
   HttpRouter.get("/api/items/:id/folder/open", handleOpenFolderFile),
   HttpRouter.get("/api/items/:id/folder/download", handleDownloadFolderFile),
   HttpRouter.get("/api/connect", handleConnect),
@@ -791,6 +824,8 @@ const app = pipe(
   HttpRouter.get("/assets/*", serveStatic),
   HttpRouter.get("/favicon.svg", serveStatic),
   HttpRouter.get("/landrop.svg", serveStatic),
+  HttpRouter.get("/manifest.webmanifest", serveStatic),
+  HttpRouter.get("/sw.js", serveStatic),
   HttpRouter.get("*", serveIndex)
 )
 
@@ -877,6 +912,10 @@ function mimeTypeForPath(pathname: string) {
 
   if (pathname.endsWith(".js")) {
     return "text/javascript; charset=utf-8"
+  }
+
+  if (pathname.endsWith(".webmanifest")) {
+    return "application/manifest+json; charset=utf-8"
   }
 
   if (pathname.endsWith(".svg")) {
@@ -988,6 +1027,81 @@ function resolveFolderChild(rootPath: string, childPath: string) {
   })
 }
 
+function collectAudioEntries(rootPath: string) {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem
+    const root = yield* fs.realPath(rootPath)
+    const entries: AudioEntry[] = []
+    const pending = [""]
+    const maxEntries = 5000
+
+    while (pending.length > 0 && entries.length < maxEntries) {
+      const relativeDir = pending.shift() ?? ""
+      const directoryPath = resolve(root, relativeDir || ".")
+
+      if (!isInside(directoryPath, root)) {
+        continue
+      }
+
+      const names = yield* Effect.either(fs.readDirectory(directoryPath))
+
+      if (names._tag === "Left") {
+        continue
+      }
+
+      for (const name of names.right) {
+        if (entries.length >= maxEntries) {
+          break
+        }
+
+        const relativePath = join(relativeDir, name).replaceAll("\\", "/")
+        const resolved = resolve(root, relativePath)
+
+        if (!isInside(resolved, root)) {
+          continue
+        }
+
+        const info = yield* Effect.either(fs.stat(resolved))
+
+        if (info._tag === "Left") {
+          continue
+        }
+
+        if (info.right.type === "Directory") {
+          pending.push(relativePath)
+          continue
+        }
+
+        if (info.right.type !== "File") {
+          continue
+        }
+
+        const mimeType = mimeTypeForFile(name)
+
+        if (!mimeType.startsWith("audio/")) {
+          continue
+        }
+
+        entries.push({
+          name,
+          path: relativePath,
+          mime_type: mimeType,
+          size: Number(info.right.size),
+          modified_at:
+            Option.getOrUndefined(info.right.mtime)?.getTime() ?? null,
+        })
+      }
+    }
+
+    return entries.sort((left, right) =>
+      left.path.localeCompare(right.path, undefined, {
+        numeric: true,
+        sensitivity: "base",
+      })
+    )
+  })
+}
+
 function serveItemFile(download: boolean) {
   return Effect.gen(function* () {
     const auth = yield* requireTrustedDevice
@@ -1032,20 +1146,19 @@ function serveItemFile(download: boolean) {
       return HttpServerResponse.text("File is missing on disk", { status: 404 })
     }
 
-    return yield* pipe(
-      HttpServerResponse.file(path, {
-        contentType: item.mime_type ?? "application/octet-stream",
-        headers: {
-          ...NO_STORE_HEADERS,
-          ...(download
-            ? {
-                "content-disposition": `attachment; filename="${escapeHeaderFilename(item.name || basename(path))}"`,
-              }
-            : {}),
-        },
-      }),
-      Effect.flatten
-    )
+    const stat = yield* fs.stat(path)
+
+    if (stat.type !== "File") {
+      return HttpServerResponse.text("Path is not a file", { status: 400 })
+    }
+
+    return yield* serveFileWithRange({
+      contentType: item.mime_type ?? "application/octet-stream",
+      download,
+      filename: item.name || basename(path),
+      path,
+      size: Number(stat.size),
+    })
   })
 }
 
@@ -1084,19 +1197,78 @@ function serveFolderFile(download: boolean) {
       return HttpServerResponse.text("Path is not a file", { status: 400 })
     }
 
-    return yield* pipe(
-      HttpServerResponse.file(path.path, {
-        contentType: mimeTypeForFile(path.path),
+    return yield* serveFileWithRange({
+      contentType: mimeTypeForFile(path.path),
+      download,
+      filename: basename(path.path),
+      path: path.path,
+      size: Number(stat.size),
+    })
+  })
+}
+
+function serveFileWithRange({
+  contentType,
+  download,
+  filename,
+  path,
+  size,
+}: {
+  contentType: string
+  download: boolean
+  filename: string
+  path: string
+  size: number
+}) {
+  return Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest
+    const webRequest = yield* HttpServerRequest.toWeb(request)
+    const range = parseRangeHeader(webRequest.headers.get("range"), size)
+    const baseHeaders = {
+      ...NO_STORE_HEADERS,
+      "accept-ranges": "bytes",
+      "content-type": contentType,
+      ...(download
+        ? {
+            "content-disposition": `attachment; filename="${escapeHeaderFilename(filename)}"`,
+          }
+        : {}),
+    }
+
+    if (range?.status === "invalid") {
+      return HttpServerResponse.fromWeb(
+        new Response(null, {
+          headers: {
+            ...baseHeaders,
+            "content-range": `bytes */${size}`,
+          },
+          status: 416,
+        })
+      )
+    }
+
+    if (range?.status === "partial") {
+      const body = Bun.file(path).slice(range.start, range.end + 1)
+
+      return HttpServerResponse.fromWeb(
+        new Response(body, {
+          headers: {
+            ...baseHeaders,
+            "content-length": String(range.end - range.start + 1),
+            "content-range": `bytes ${range.start}-${range.end}/${size}`,
+          },
+          status: 206,
+        })
+      )
+    }
+
+    return HttpServerResponse.fromWeb(
+      new Response(Bun.file(path), {
         headers: {
-          ...NO_STORE_HEADERS,
-          ...(download
-            ? {
-                "content-disposition": `attachment; filename="${escapeHeaderFilename(basename(path.path))}"`,
-              }
-            : {}),
+          ...baseHeaders,
+          "content-length": String(size),
         },
-      }),
-      Effect.flatten
+      })
     )
   })
 }
@@ -1145,6 +1317,57 @@ function isInside(path: string, root: string) {
 
 function escapeHeaderFilename(name: string) {
   return name.replaceAll("\\", "\\\\").replaceAll('"', '\\"')
+}
+
+function parseRangeHeader(header: string | null, size: number) {
+  if (!header) {
+    return null
+  }
+
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim())
+
+  if (!match || size <= 0) {
+    return { status: "invalid" as const }
+  }
+
+  const [, rawStart, rawEnd] = match
+
+  if (!rawStart && !rawEnd) {
+    return { status: "invalid" as const }
+  }
+
+  if (!rawStart) {
+    const suffixLength = Number(rawEnd)
+
+    if (!Number.isInteger(suffixLength) || suffixLength <= 0) {
+      return { status: "invalid" as const }
+    }
+
+    return {
+      status: "partial" as const,
+      start: Math.max(size - suffixLength, 0),
+      end: size - 1,
+    }
+  }
+
+  const start = Number(rawStart)
+  const requestedEnd = rawEnd ? Number(rawEnd) : size - 1
+
+  if (
+    !Number.isInteger(start) ||
+    !Number.isInteger(requestedEnd) ||
+    start < 0 ||
+    requestedEnd < start ||
+    start >= size
+  ) {
+    return { status: "invalid" as const }
+  }
+
+  return {
+    status: "partial" as const,
+    start,
+    end: Math.min(requestedEnd, size - 1),
+  }
 }
 
 function sanitizeDeviceName(name: string) {
