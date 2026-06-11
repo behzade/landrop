@@ -162,20 +162,22 @@ const sortLabels: Record<SortKey, string> = {
 
 const appChrome = {
   content:
-    "mx-auto w-full max-w-[var(--landrop-shell-max)] min-w-0 px-[var(--landrop-shell-pad)] py-3 pb-[var(--landrop-player-reserve)] sm:px-[var(--landrop-shell-pad-wide)] sm:py-4",
+    "min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain px-[var(--landrop-shell-pad)] py-3 sm:px-[var(--landrop-shell-pad-wide)] sm:py-4",
   header:
-    "sticky top-0 z-20 border-b bg-background/95 px-[var(--landrop-shell-pad)] py-2 backdrop-blur sm:px-[var(--landrop-shell-pad-wide)]",
+    "shrink-0 border-b bg-background/95 px-[var(--landrop-shell-pad)] py-2 backdrop-blur sm:px-[var(--landrop-shell-pad-wide)]",
   shell:
     "mx-auto flex w-full max-w-[var(--landrop-shell-max)] min-w-0 items-center justify-between gap-3",
+  viewport:
+    "mx-auto grid h-svh w-full max-w-[var(--landrop-shell-max)] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden bg-background text-foreground",
 }
 
 const playerChrome = {
-  bar: "fixed inset-x-0 bottom-0 z-30 w-full max-w-full overflow-hidden border-t bg-background/95 shadow-lg backdrop-blur",
+  bar: "shrink-0 overflow-hidden border-t bg-background/95 shadow-lg backdrop-blur",
   body: "min-w-0 border bg-muted p-3",
   control: "h-[var(--landrop-player-control)] w-full min-w-0",
   controls: "grid grid-cols-5 gap-1.5 sm:gap-2",
   inner:
-    "relative mx-auto w-full max-w-[var(--landrop-shell-max)] min-w-0 px-[var(--landrop-shell-pad)] py-2 sm:px-[var(--landrop-shell-pad-wide)]",
+    "relative w-full min-w-0 px-[var(--landrop-shell-pad)] py-2 sm:px-[var(--landrop-shell-pad-wide)]",
 }
 
 export function App() {
@@ -988,468 +990,473 @@ export function App() {
   }
 
   return (
-    <main className="min-h-svh w-full max-w-full overflow-x-hidden bg-background text-foreground">
-      <div className={appChrome.header}>
-        <div className={appChrome.shell}>
-          <div className="flex min-w-0 items-center gap-3">
-            <img alt="" className="size-8 shrink-0" src={landropLogoUrl} />
-            <div className="min-w-0">
-              <h1 className="truncate text-base font-semibold">Shelf</h1>
-              <p className="truncate text-xs text-muted-foreground">
-                {numberFormat.format(visibleItems.length)} shown of{" "}
-                {numberFormat.format(items.length)}
-              </p>
+    <main className="h-svh w-full overflow-hidden bg-background text-foreground">
+      <div className={appChrome.viewport}>
+        <div className={appChrome.header}>
+          <div className={appChrome.shell}>
+            <div className="flex min-w-0 items-center gap-3">
+              <img alt="" className="size-8 shrink-0" src={landropLogoUrl} />
+              <div className="min-w-0">
+                <h1 className="truncate text-base font-semibold">Shelf</h1>
+                <p className="truncate text-xs text-muted-foreground">
+                  {numberFormat.format(visibleItems.length)} shown of{" "}
+                  {numberFormat.format(items.length)}
+                </p>
+              </div>
             </div>
-          </div>
-          <div className="flex shrink-0 gap-2">
-            <Dialog open={sendOpen} onOpenChange={setSendOpen}>
-              <DialogTrigger
-                render={
-                  <Button
-                    aria-label="Add"
-                    className="size-9"
-                    title="Add"
-                    type="button"
-                    variant="default"
-                  />
-                }
-              >
-                <AppIcon icon={Add01Icon} />
-                <span className="sr-only">Add</span>
-              </DialogTrigger>
-              <DialogContent className="sm:max-w-2xl">
-                <DialogHeader>
-                  <DialogTitle>Add to library</DialogTitle>
-                  <DialogDescription>
-                    Send text, upload a file, or pull an image from the
-                    clipboard.
-                  </DialogDescription>
-                </DialogHeader>
+            <div className="flex shrink-0 gap-2">
+              <Dialog open={sendOpen} onOpenChange={setSendOpen}>
+                <DialogTrigger
+                  render={
+                    <Button
+                      aria-label="Add"
+                      className="size-9"
+                      title="Add"
+                      type="button"
+                      variant="default"
+                    />
+                  }
+                >
+                  <AppIcon icon={Add01Icon} />
+                  <span className="sr-only">Add</span>
+                </DialogTrigger>
+                <DialogContent className="sm:max-w-2xl">
+                  <DialogHeader>
+                    <DialogTitle>Add to library</DialogTitle>
+                    <DialogDescription>
+                      Send text, upload a file, or pull an image from the
+                      clipboard.
+                    </DialogDescription>
+                  </DialogHeader>
 
-                <div className="grid gap-4">
-                  <div className="grid grid-cols-4 border">
-                    {[
-                      { key: "text", label: "Text", icon: TextIcon },
-                      { key: "file", label: "File", icon: FolderUploadIcon },
-                      {
-                        key: "folder",
-                        label: "Collection",
-                        icon: FolderOpenIcon,
-                      },
-                      {
-                        key: "clipboard",
-                        label: "Clipboard",
-                        icon: ClipboardIcon,
-                      },
-                    ].map((tab) => (
-                      <button
-                        className={cn(
-                          "flex h-10 items-center justify-center gap-2 border-r text-xs last:border-r-0 hover:bg-muted",
-                          uploadTab === tab.key && "bg-muted text-foreground"
-                        )}
-                        key={tab.key}
-                        type="button"
-                        onClick={() => setUploadTab(tab.key as UploadTab)}
-                      >
-                        <AppIcon icon={tab.icon} />
-                        {tab.label}
-                      </button>
-                    ))}
-                  </div>
-
-                  {uploadTab === "text" ? (
-                    <form className="grid gap-3" onSubmit={submitPaste}>
-                      <Label
-                        className="flex items-center gap-2 text-muted-foreground uppercase"
-                        htmlFor="drop-text"
-                      >
-                        <AppIcon icon={TextIcon} />
-                        Paste text / JSON
-                      </Label>
-                      <Textarea
-                        id="drop-text"
-                        name="text"
-                        className="min-h-64 resize-y bg-background/80 p-4 font-mono text-sm leading-6"
-                        placeholder='{"from": "phone", "to": "desktop"}'
-                      />
-                      <Button
-                        className="h-11 w-full text-sm"
-                        type="submit"
-                        disabled={pasteSubmitting}
-                      >
-                        <AppIcon icon={SentIcon} />
-                        {pasteSubmitting ? "Sending..." : "Send paste"}
-                      </Button>
-                    </form>
-                  ) : null}
-
-                  {uploadTab === "file" ? (
-                    <form className="grid gap-3" onSubmit={submitUpload}>
-                      <div
-                        className={cn(
-                          "grid min-h-44 place-items-center border border-dashed bg-muted/40 p-6 text-center transition-colors",
-                          dropActive && "border-primary bg-primary/10"
-                        )}
-                        onDragLeave={() => setDropActive(false)}
-                        onDragOver={(event) => {
-                          event.preventDefault()
-                          setDropActive(true)
-                        }}
-                        onDrop={dropUploadFile}
-                      >
-                        <div className="grid gap-3">
-                          <div className="mx-auto flex size-12 items-center justify-center border bg-background">
-                            <AppIcon
-                              icon={Upload04Icon}
-                              className="size-5 text-primary"
-                            />
-                          </div>
-                          <div>
-                            <p className="text-sm font-medium">
-                              {selectedFile
-                                ? selectedFile.name
-                                : "Drop a file here"}
-                            </p>
-                            <p className="mt-1 text-xs text-muted-foreground">
-                              {selectedFile
-                                ? `${numberFormat.format(selectedFile.size)} bytes`
-                                : "or choose a file from this device"}
-                            </p>
-                          </div>
-                          <Input
-                            className="h-10 bg-background"
-                            type="file"
-                            name="file"
-                            onChange={selectUploadFile}
-                          />
-                        </div>
-                      </div>
-                      <Button
-                        className="h-11 w-full text-sm"
-                        type="submit"
-                        disabled={uploadSubmitting}
-                      >
-                        <AppIcon icon={FileUploadIcon} />
-                        {uploadSubmitting ? "Uploading..." : "Upload file"}
-                      </Button>
-                    </form>
-                  ) : null}
-
-                  {uploadTab === "folder" ? (
-                    <form className="grid gap-3" onSubmit={submitFolder}>
-                      <div className="grid min-h-44 place-items-center border border-dashed bg-muted/40 p-6 text-center">
-                        <div className="grid w-full max-w-lg gap-3">
-                          <div className="mx-auto flex size-12 items-center justify-center border bg-background">
-                            <AppIcon
-                              icon={FolderOpenIcon}
-                              className="size-5 text-primary"
-                            />
-                          </div>
-                          <div>
-                            <p className="text-sm font-medium">
-                              Add a collection
-                            </p>
-                            <p className="mt-1 text-xs text-muted-foreground">
-                              Use a folder path on the device running LAN Drop.
-                            </p>
-                          </div>
-                          <Input
-                            className="h-10 bg-background font-mono text-xs"
-                            name="path"
-                            placeholder="~/Music"
-                          />
-                        </div>
-                      </div>
-                      <Button
-                        className="h-11 w-full text-sm"
-                        type="submit"
-                        disabled={folderSubmitting}
-                      >
-                        <AppIcon icon={FolderOpenIcon} />
-                        {folderSubmitting ? "Adding..." : "Add collection"}
-                      </Button>
-                    </form>
-                  ) : null}
-
-                  {uploadTab === "clipboard" ? (
-                    <div className="grid gap-3">
-                      <div className="grid min-h-56 place-items-center border bg-muted/40 p-6 text-center">
-                        <div className="grid gap-3">
-                          <div className="mx-auto flex size-12 items-center justify-center border bg-background">
-                            <AppIcon
-                              icon={Image01Icon}
-                              className="size-5 text-primary"
-                            />
-                          </div>
-                          <div>
-                            <p className="text-sm font-medium">
-                              Upload clipboard image
-                            </p>
-                            <p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">
-                              Copy an image or screenshot, then let LAN Drop
-                              read it from the browser clipboard.
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                      <Button
-                        className="h-11 w-full text-sm"
-                        type="button"
-                        disabled={uploadSubmitting}
-                        onClick={uploadClipboardImage}
-                      >
-                        <AppIcon icon={ClipboardCopyIcon} />
-                        {uploadSubmitting
-                          ? "Uploading..."
-                          : "Upload image from clipboard"}
-                      </Button>
+                  <div className="grid gap-4">
+                    <div className="grid grid-cols-4 border">
+                      {[
+                        { key: "text", label: "Text", icon: TextIcon },
+                        { key: "file", label: "File", icon: FolderUploadIcon },
+                        {
+                          key: "folder",
+                          label: "Collection",
+                          icon: FolderOpenIcon,
+                        },
+                        {
+                          key: "clipboard",
+                          label: "Clipboard",
+                          icon: ClipboardIcon,
+                        },
+                      ].map((tab) => (
+                        <button
+                          className={cn(
+                            "flex h-10 items-center justify-center gap-2 border-r text-xs last:border-r-0 hover:bg-muted",
+                            uploadTab === tab.key && "bg-muted text-foreground"
+                          )}
+                          key={tab.key}
+                          type="button"
+                          onClick={() => setUploadTab(tab.key as UploadTab)}
+                        >
+                          <AppIcon icon={tab.icon} />
+                          {tab.label}
+                        </button>
+                      ))}
                     </div>
-                  ) : null}
-                </div>
-              </DialogContent>
-            </Dialog>
 
-            <Dialog>
-              <DialogTrigger
-                render={
-                  <Button
-                    aria-label="Devices"
-                    className="size-9"
-                    title="Devices"
-                    type="button"
-                    variant="outline"
-                  />
-                }
-              >
-                <AppIcon icon={ComputerPhoneSyncIcon} />
-                <span className="sr-only">Devices</span>
-              </DialogTrigger>
-              <DialogContent className="sm:max-w-xl">
-                <DialogHeader>
-                  <DialogTitle>Trusted browsers</DialogTitle>
-                  <DialogDescription>
-                    Rename this browser or revoke paired devices.
-                  </DialogDescription>
-                </DialogHeader>
-
-                <div className="grid gap-4">
-                  {currentDeviceId ? (
-                    <form className="grid gap-2" onSubmit={submitDeviceName}>
-                      <Label
-                        className="tracking-[0.2em] text-muted-foreground uppercase"
-                        htmlFor="device-name"
-                      >
-                        This device
-                      </Label>
-                      <div className="flex gap-2">
-                        <Input
-                          className="min-w-0 bg-background/80"
-                          id="device-name"
-                          value={deviceName}
-                          onChange={(event) =>
-                            setDeviceName(event.target.value)
-                          }
+                    {uploadTab === "text" ? (
+                      <form className="grid gap-3" onSubmit={submitPaste}>
+                        <Label
+                          className="flex items-center gap-2 text-muted-foreground uppercase"
+                          htmlFor="drop-text"
+                        >
+                          <AppIcon icon={TextIcon} />
+                          Paste text / JSON
+                        </Label>
+                        <Textarea
+                          id="drop-text"
+                          name="text"
+                          className="min-h-64 resize-y bg-background/80 p-4 font-mono text-sm leading-6"
+                          placeholder='{"from": "phone", "to": "desktop"}'
                         />
                         <Button
-                          className="shrink-0"
+                          className="h-11 w-full text-sm"
                           type="submit"
-                          disabled={deviceSaving}
+                          disabled={pasteSubmitting}
                         >
-                          {deviceSaving ? "Saving..." : "Save"}
+                          <AppIcon icon={SentIcon} />
+                          {pasteSubmitting ? "Sending..." : "Send paste"}
                         </Button>
-                      </div>
-                    </form>
-                  ) : devices.length === 0 ? (
-                    <p className="border bg-muted p-3 text-xs leading-5 text-muted-foreground">
-                      Localhost is trusted automatically. Open the LAN URL and
-                      pair this browser if you want a named device.
-                    </p>
-                  ) : (
-                    <p className="text-xs leading-5 text-muted-foreground">
-                      Localhost is auto-trusted. Rename from the paired LAN
-                      browser.
-                    </p>
-                  )}
+                      </form>
+                    ) : null}
 
-                  <div className="grid gap-2">
-                    {devices.map((device) => (
-                      <article
-                        className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border bg-background/70 p-3"
-                        key={device.id}
-                      >
-                        <div className="min-w-0">
-                          <div
-                            className="truncate text-sm font-medium"
-                            title={device.name}
-                          >
-                            {device.name}
-                          </div>
-                          <div className="mt-1 truncate text-xs text-muted-foreground">
-                            {new Date(device.created_at).toLocaleString()}
-                          </div>
-                        </div>
-                        <div className="flex shrink-0 items-center gap-2">
-                          {device.id === currentDeviceId ? (
-                            <Badge variant="default">
-                              <AppIcon icon={CheckmarkCircle02Icon} />
-                              <span className="sr-only">This device</span>
-                            </Badge>
-                          ) : (
-                            <Badge variant="outline">
-                              <AppIcon icon={Shield01Icon} />
-                              <span className="sr-only">Trusted</span>
-                            </Badge>
+                    {uploadTab === "file" ? (
+                      <form className="grid gap-3" onSubmit={submitUpload}>
+                        <div
+                          className={cn(
+                            "grid min-h-44 place-items-center border border-dashed bg-muted/40 p-6 text-center transition-colors",
+                            dropActive && "border-primary bg-primary/10"
                           )}
-                          <Button
-                            aria-label={`Revoke ${device.name}`}
-                            size="icon-xs"
-                            type="button"
-                            variant="destructive"
-                            disabled={revokingDeviceId === device.id}
-                            onClick={() => revokeDevice(device)}
-                          >
-                            <AppIcon icon={Delete02Icon} />
-                          </Button>
+                          onDragLeave={() => setDropActive(false)}
+                          onDragOver={(event) => {
+                            event.preventDefault()
+                            setDropActive(true)
+                          }}
+                          onDrop={dropUploadFile}
+                        >
+                          <div className="grid gap-3">
+                            <div className="mx-auto flex size-12 items-center justify-center border bg-background">
+                              <AppIcon
+                                icon={Upload04Icon}
+                                className="size-5 text-primary"
+                              />
+                            </div>
+                            <div>
+                              <p className="text-sm font-medium">
+                                {selectedFile
+                                  ? selectedFile.name
+                                  : "Drop a file here"}
+                              </p>
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                {selectedFile
+                                  ? `${numberFormat.format(selectedFile.size)} bytes`
+                                  : "or choose a file from this device"}
+                              </p>
+                            </div>
+                            <Input
+                              className="h-10 bg-background"
+                              type="file"
+                              name="file"
+                              onChange={selectUploadFile}
+                            />
+                          </div>
                         </div>
-                      </article>
-                    ))}
+                        <Button
+                          className="h-11 w-full text-sm"
+                          type="submit"
+                          disabled={uploadSubmitting}
+                        >
+                          <AppIcon icon={FileUploadIcon} />
+                          {uploadSubmitting ? "Uploading..." : "Upload file"}
+                        </Button>
+                      </form>
+                    ) : null}
 
-                    {devices.length === 0 ? (
-                      <div className="border bg-muted p-3 text-xs text-muted-foreground">
-                        No token-backed devices yet.
+                    {uploadTab === "folder" ? (
+                      <form className="grid gap-3" onSubmit={submitFolder}>
+                        <div className="grid min-h-44 place-items-center border border-dashed bg-muted/40 p-6 text-center">
+                          <div className="grid w-full max-w-lg gap-3">
+                            <div className="mx-auto flex size-12 items-center justify-center border bg-background">
+                              <AppIcon
+                                icon={FolderOpenIcon}
+                                className="size-5 text-primary"
+                              />
+                            </div>
+                            <div>
+                              <p className="text-sm font-medium">
+                                Add a collection
+                              </p>
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                Use a folder path on the device running LAN
+                                Drop.
+                              </p>
+                            </div>
+                            <Input
+                              className="h-10 bg-background font-mono text-xs"
+                              name="path"
+                              placeholder="~/Music"
+                            />
+                          </div>
+                        </div>
+                        <Button
+                          className="h-11 w-full text-sm"
+                          type="submit"
+                          disabled={folderSubmitting}
+                        >
+                          <AppIcon icon={FolderOpenIcon} />
+                          {folderSubmitting ? "Adding..." : "Add collection"}
+                        </Button>
+                      </form>
+                    ) : null}
+
+                    {uploadTab === "clipboard" ? (
+                      <div className="grid gap-3">
+                        <div className="grid min-h-56 place-items-center border bg-muted/40 p-6 text-center">
+                          <div className="grid gap-3">
+                            <div className="mx-auto flex size-12 items-center justify-center border bg-background">
+                              <AppIcon
+                                icon={Image01Icon}
+                                className="size-5 text-primary"
+                              />
+                            </div>
+                            <div>
+                              <p className="text-sm font-medium">
+                                Upload clipboard image
+                              </p>
+                              <p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">
+                                Copy an image or screenshot, then let LAN Drop
+                                read it from the browser clipboard.
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                        <Button
+                          className="h-11 w-full text-sm"
+                          type="button"
+                          disabled={uploadSubmitting}
+                          onClick={uploadClipboardImage}
+                        >
+                          <AppIcon icon={ClipboardCopyIcon} />
+                          {uploadSubmitting
+                            ? "Uploading..."
+                            : "Upload image from clipboard"}
+                        </Button>
                       </div>
                     ) : null}
                   </div>
-                </div>
+                </DialogContent>
+              </Dialog>
 
-                <DialogFooter showCloseButton />
-              </DialogContent>
-            </Dialog>
+              <Dialog>
+                <DialogTrigger
+                  render={
+                    <Button
+                      aria-label="Devices"
+                      className="size-9"
+                      title="Devices"
+                      type="button"
+                      variant="outline"
+                    />
+                  }
+                >
+                  <AppIcon icon={ComputerPhoneSyncIcon} />
+                  <span className="sr-only">Devices</span>
+                </DialogTrigger>
+                <DialogContent className="sm:max-w-xl">
+                  <DialogHeader>
+                    <DialogTitle>Trusted browsers</DialogTitle>
+                    <DialogDescription>
+                      Rename this browser or revoke paired devices.
+                    </DialogDescription>
+                  </DialogHeader>
 
-            <Dialog>
-              <DialogTrigger
-                render={
-                  <Button
-                    aria-label="Connect phone"
-                    className="size-9"
-                    title="Connect phone"
-                    type="button"
-                    variant="default"
-                  />
-                }
-              >
-                <AppIcon icon={QrCodeScanIcon} />
-                <span className="sr-only">Connect phone</span>
-              </DialogTrigger>
-              <DialogContent className="sm:max-w-md">
-                <DialogHeader>
-                  <DialogTitle>Connect phone</DialogTitle>
-                  <DialogDescription>
-                    Scan this QR code from your phone on the same Wi-Fi.
-                  </DialogDescription>
-                </DialogHeader>
-
-                <div className="grid gap-4">
-                  <div className="mx-auto border bg-white p-4">
-                    {qrDataUrl ? (
-                      <img
-                        alt={`QR code for ${connectUrl}`}
-                        className="size-64"
-                        src={qrDataUrl}
-                      />
+                  <div className="grid gap-4">
+                    {currentDeviceId ? (
+                      <form className="grid gap-2" onSubmit={submitDeviceName}>
+                        <Label
+                          className="tracking-[0.2em] text-muted-foreground uppercase"
+                          htmlFor="device-name"
+                        >
+                          This device
+                        </Label>
+                        <div className="flex gap-2">
+                          <Input
+                            className="min-w-0 bg-background/80"
+                            id="device-name"
+                            value={deviceName}
+                            onChange={(event) =>
+                              setDeviceName(event.target.value)
+                            }
+                          />
+                          <Button
+                            className="shrink-0"
+                            type="submit"
+                            disabled={deviceSaving}
+                          >
+                            {deviceSaving ? "Saving..." : "Save"}
+                          </Button>
+                        </div>
+                      </form>
+                    ) : devices.length === 0 ? (
+                      <p className="border bg-muted p-3 text-xs leading-5 text-muted-foreground">
+                        Localhost is trusted automatically. Open the LAN URL and
+                        pair this browser if you want a named device.
+                      </p>
                     ) : (
-                      <div className="grid size-64 place-items-center text-xs text-black">
-                        Generating QR...
-                      </div>
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        Localhost is auto-trusted. Rename from the paired LAN
+                        browser.
+                      </p>
                     )}
+
+                    <div className="grid gap-2">
+                      {devices.map((device) => (
+                        <article
+                          className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border bg-background/70 p-3"
+                          key={device.id}
+                        >
+                          <div className="min-w-0">
+                            <div
+                              className="truncate text-sm font-medium"
+                              title={device.name}
+                            >
+                              {device.name}
+                            </div>
+                            <div className="mt-1 truncate text-xs text-muted-foreground">
+                              {new Date(device.created_at).toLocaleString()}
+                            </div>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-2">
+                            {device.id === currentDeviceId ? (
+                              <Badge variant="default">
+                                <AppIcon icon={CheckmarkCircle02Icon} />
+                                <span className="sr-only">This device</span>
+                              </Badge>
+                            ) : (
+                              <Badge variant="outline">
+                                <AppIcon icon={Shield01Icon} />
+                                <span className="sr-only">Trusted</span>
+                              </Badge>
+                            )}
+                            <Button
+                              aria-label={`Revoke ${device.name}`}
+                              size="icon-xs"
+                              type="button"
+                              variant="destructive"
+                              disabled={revokingDeviceId === device.id}
+                              onClick={() => revokeDevice(device)}
+                            >
+                              <AppIcon icon={Delete02Icon} />
+                            </Button>
+                          </div>
+                        </article>
+                      ))}
+
+                      {devices.length === 0 ? (
+                        <div className="border bg-muted p-3 text-xs text-muted-foreground">
+                          No token-backed devices yet.
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
 
-                  <a
-                    className="border bg-muted px-3 py-2 text-xs break-all text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-                    href={connectUrl}
-                  >
-                    {connectUrl || "Loading LAN address..."}
-                  </a>
-                </div>
+                  <DialogFooter showCloseButton />
+                </DialogContent>
+              </Dialog>
 
-                <DialogFooter showCloseButton />
-              </DialogContent>
-            </Dialog>
+              <Dialog>
+                <DialogTrigger
+                  render={
+                    <Button
+                      aria-label="Connect phone"
+                      className="size-9"
+                      title="Connect phone"
+                      type="button"
+                      variant="default"
+                    />
+                  }
+                >
+                  <AppIcon icon={QrCodeScanIcon} />
+                  <span className="sr-only">Connect phone</span>
+                </DialogTrigger>
+                <DialogContent className="sm:max-w-md">
+                  <DialogHeader>
+                    <DialogTitle>Connect phone</DialogTitle>
+                    <DialogDescription>
+                      Scan this QR code from your phone on the same Wi-Fi.
+                    </DialogDescription>
+                  </DialogHeader>
+
+                  <div className="grid gap-4">
+                    <div className="mx-auto border bg-white p-4">
+                      {qrDataUrl ? (
+                        <img
+                          alt={`QR code for ${connectUrl}`}
+                          className="size-64"
+                          src={qrDataUrl}
+                        />
+                      ) : (
+                        <div className="grid size-64 place-items-center text-xs text-black">
+                          Generating QR...
+                        </div>
+                      )}
+                    </div>
+
+                    <a
+                      className="border bg-muted px-3 py-2 text-xs break-all text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+                      href={connectUrl}
+                    >
+                      {connectUrl || "Loading LAN address..."}
+                    </a>
+                  </div>
+
+                  <DialogFooter showCloseButton />
+                </DialogContent>
+              </Dialog>
+            </div>
           </div>
         </div>
-      </div>
 
-      <div className={appChrome.content}>
-        {activeView.kind === "home" ? (
-          <HomeView
-            itemCounts={itemCounts}
-            items={visibleItems}
-            inboxFilter={inboxFilter}
-            removingItemId={removingItemId}
-            sortKey={sortKey}
-            status={status}
-            onChangeFilter={setInboxFilter}
-            onChangeSort={setSortKey}
-            onOpenItem={openItem}
-            onRemoveItem={removeItem}
-          />
-        ) : null}
+        <div className={appChrome.content}>
+          <div className="mx-auto w-full max-w-[var(--landrop-shell-max)] min-w-0">
+            {activeView.kind === "home" ? (
+              <HomeView
+                itemCounts={itemCounts}
+                items={visibleItems}
+                inboxFilter={inboxFilter}
+                removingItemId={removingItemId}
+                sortKey={sortKey}
+                status={status}
+                onChangeFilter={setInboxFilter}
+                onChangeSort={setSortKey}
+                onOpenItem={openItem}
+                onRemoveItem={removeItem}
+              />
+            ) : null}
 
-        {activeView.kind === "folder" ? (
-          <FolderView
-            item={activeView.item}
-            path={activeView.path}
+            {activeView.kind === "folder" ? (
+              <FolderView
+                item={activeView.item}
+                path={activeView.path}
+                player={player}
+                onBack={() => navigate({ kind: "home" })}
+                onOpenEntry={(entry) =>
+                  navigate({
+                    kind: "folder-entry",
+                    folder: activeView.item,
+                    entry,
+                  })
+                }
+                onPathChange={(path) =>
+                  navigate({ kind: "folder", item: activeView.item, path })
+                }
+                onSetPlayer={(nextPlayer) => setPlayer(nextPlayer)}
+              />
+            ) : null}
+
+            {activeView.kind === "item" ? (
+              <ItemView
+                item={activeView.item}
+                copyStatus={copyStatus}
+                onBack={() => navigate({ kind: "home" })}
+                onCopyStatusChange={setCopyStatus}
+              />
+            ) : null}
+
+            {activeView.kind === "folder-entry" ? (
+              <FolderEntryView
+                entry={activeView.entry}
+                folder={activeView.folder}
+                onBack={() =>
+                  navigate({
+                    kind: "folder",
+                    item: activeView.folder,
+                    path: parentFolderPath(activeView.entry.path),
+                  })
+                }
+              />
+            ) : null}
+          </div>
+        </div>
+
+        {player ? (
+          <StickyPlayer
             player={player}
-            onBack={() => navigate({ kind: "home" })}
-            onOpenEntry={(entry) =>
-              navigate({
-                kind: "folder-entry",
-                folder: activeView.item,
-                entry,
-              })
-            }
-            onPathChange={(path) =>
-              navigate({ kind: "folder", item: activeView.item, path })
-            }
-            onSetPlayer={(nextPlayer) => setPlayer(nextPlayer)}
-          />
-        ) : null}
-
-        {activeView.kind === "item" ? (
-          <ItemView
-            item={activeView.item}
-            copyStatus={copyStatus}
-            onBack={() => navigate({ kind: "home" })}
-            onCopyStatusChange={setCopyStatus}
-          />
-        ) : null}
-
-        {activeView.kind === "folder-entry" ? (
-          <FolderEntryView
-            entry={activeView.entry}
-            folder={activeView.folder}
-            onBack={() =>
-              navigate({
-                kind: "folder",
-                item: activeView.folder,
-                path: parentFolderPath(activeView.entry.path),
-              })
+            onClose={() => setPlayer(null)}
+            onSelectIndex={(currentIndex) =>
+              setPlayer((current) =>
+                current ? { ...current, currentIndex } : current
+              )
             }
           />
         ) : null}
       </div>
-
-      {player ? (
-        <StickyPlayer
-          player={player}
-          onClose={() => setPlayer(null)}
-          onSelectIndex={(currentIndex) =>
-            setPlayer((current) =>
-              current ? { ...current, currentIndex } : current
-            )
-          }
-        />
-      ) : null}
     </main>
   )
 }

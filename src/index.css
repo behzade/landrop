@@ -49,10 +49,9 @@
 }
 
 :root {
-    --landrop-shell-max: 36rem;
+    --landrop-shell-max: 28rem;
     --landrop-shell-pad: 0.75rem;
     --landrop-shell-pad-wide: 1rem;
-    --landrop-player-reserve: 10.75rem;
     --landrop-player-control: 2.5rem;
     --background: oklch(0.985 0.006 76);
     --foreground: oklch(0.18 0.012 64);
@@ -129,7 +128,7 @@
   html,
   body,
   #root {
-    @apply min-h-full w-full max-w-full overflow-x-hidden;
+    @apply h-full w-full max-w-full overflow-hidden;
     }
   body {
     @apply overflow-x-hidden bg-background text-foreground;
